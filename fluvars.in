@@ -1,0 +1,37 @@
+0 print-info?(0=no,1=yes)
+100 number_of_days_to_run_each_simulation
+1 numruns_within_reps_to_average(usually_just=1)
+10 number_of_replicates_for_each_parameter_setting
+1 num_net_types(net_types_follow:0=SWN,1=SFN)
+0
+1 num_swnP_values(swnP_values_follow)
+1.0
+1 vaccinate?(zero=no,one=yes)
+2 number_of_days_to_vaccinate(days_follow_in_order)
+4 28
+1 num_of_combinations_of_vaccination_strategies(combinations_follow:0=randomly,1=hubs,2=lowclustering,3=highclustering,4=cross-cuts)
+0 2
+6 num_of_combinations_of_proportions_of_pop_to_vacc(ranges_from_0-1__combinations_follow)
+0.032 0.018 0.063 0.037 0.095 0.055 0.126 0.074 0.158 0.092 0.189 0.111
+3 num_pop_sizes(pop_sizes_follow)
+100 10000 100000
+1 num_NCR(neighbor_contact_rates)(NCRs_follow)
+0.5
+1 num_mutation_rates(rates,ranging_from_0-1,follow)
+0.0
+4 original_number_neighbors_on_each_side_for_SWN(=2n_neighbors)
+0 make_infected_host_file?=BIG_FILE!(0=no,1=yes)
+0 make_tree_file(0=no,1=yes)
+0 print_strains(0=no,1=yes)
+0 makepajek_file?(0=no,1=yes)
+0 make_average?(0=no,1=yes)
+0 make_degree_dist_file?(0=no,1=yes)
+2 numbits_Hstrains_(number_subtypes=2^n)
+2 numbits_Nstrains_(number_subtypes=2^n)
+32 numbits_strain_(number_strains=2^n)
+1 num_days_to_infectious_state=latent_period
+3 num_days_hosts_are_infectious
+1 num_of_flu_strains_in_vaccine_(max=3):strains_follow
+0 0 0 H_N_strain_vaccine
+1 num_strains_for_initial_infection,each_strain_follow(max=20):
+0 0 0 H_N_strain_for_initial_infection
