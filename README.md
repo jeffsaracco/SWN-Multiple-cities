@@ -1,5 +1,8 @@
 # Small World Network: Multiple Cities
 
+<img width="2048" height="1354" alt="image" src="https://github.com/user-attachments/assets/973140fd-cc86-4c1b-9753-776115fea1a3" />
+
+
 A simulation of influenza spreading through a population, where each person is
 a node in a [small-world network](https://en.wikipedia.org/wiki/Watts%E2%80%93Strogatz_model).
 The population is split into several "cities", each running as its own process
