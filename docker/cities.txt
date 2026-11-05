@@ -1,0 +1,5 @@
+# host port -- line N is city N; hosts are docker-compose service names
+city1 5529
+city2 5529
+city3 5529
+city4 5529

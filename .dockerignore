@@ -1,0 +1,6 @@
+run/
+run-docker/
+swn
+swn_cities
+client
+*.o
