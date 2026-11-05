@@ -1,2 +1,7 @@
 .DS_Store
 .gdb_history
+/swn
+/swn_cities
+/client
+/run/
+/run-docker/
