@@ -1,0 +1,1045 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Small World Flu</title>
+<style>
+  :root {
+    --bg: #04050a;
+    --panel: rgba(12, 14, 22, 0.72);
+    --panel-border: rgba(255, 255, 255, 0.08);
+    --text: #e8e9ee;
+    --muted: #8a8fa3;
+    --blood: #ff2a2a;
+    --blood-dim: #7a1016;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #scene { position: fixed; inset: 0; }
+  #labels { position: fixed; inset: 0; pointer-events: none; }
+  .panel { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+
+  #title { position: fixed; top: 16px; left: 16px; padding: 12px 16px; max-width: calc(100vw - 32px); }
+  #title h1 { margin: 0; font-size: 16px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; }
+  #title h1 span { color: var(--blood); }
+  #title p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+  #day-big { margin-top: 8px; font: 600 28px/1 var(--mono); }
+  #day-big small { font-size: 13px; color: var(--muted); font-weight: 400; }
+  #total { color: var(--muted); font: 12px var(--mono); margin-top: 4px; }
+  #total b { color: var(--blood); font-weight: 600; }
+
+  #cities { position: fixed; top: 16px; right: 16px; width: 250px; max-height: calc(100vh - 150px);
+    overflow-y: auto; padding: 6px; }
+  #globe-view { width: 100%; margin-bottom: 4px; padding: 6px 8px; border: 0; border-radius: 6px; text-align: left;
+    background: rgba(255, 255, 255, 0.06); color: var(--text); font: inherit; cursor: pointer; }
+  #globe-view:hover { background: rgba(255, 255, 255, 0.1); }
+  .city { display: grid; grid-template-columns: 10px 1fr auto; gap: 4px 8px; align-items: center;
+    padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+  .city:hover { background: rgba(255, 255, 255, 0.05); }
+  .city .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .city .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .city .count { font: 12px var(--mono); color: var(--muted); text-align: right; }
+  .city .count.hot { color: var(--blood); }
+  .city .bar { grid-column: 2 / 4; height: 3px; background: rgba(255, 255, 255, 0.06); border-radius: 2px; overflow: hidden; }
+  .city .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--blood-dim), var(--blood)); }
+
+  #timeline { position: fixed; left: 16px; right: 16px; bottom: 16px; padding: 10px 12px;
+    display: flex; align-items: center; gap: 12px; }
+  #play { flex: none; width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--panel-border);
+    background: rgba(255, 42, 42, 0.15); color: var(--text); cursor: pointer; font-size: 15px; }
+  #play:hover { background: rgba(255, 42, 42, 0.3); }
+  #track { position: relative; flex: 1; height: 48px; min-width: 0; }
+  #chart { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #scrub { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+  #playhead { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text);
+    pointer-events: none; transform: translateX(-1px); }
+  #speeds { flex: none; display: flex; gap: 2px; }
+  #speeds button { border: 0; background: transparent; color: var(--muted); font: 12px var(--mono);
+    padding: 4px 6px; border-radius: 4px; cursor: pointer; }
+  #speeds button.on { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+
+  .label { font: 11px var(--mono); color: var(--text); text-align: center; white-space: nowrap;
+    text-shadow: 0 0 4px #000, 0 0 8px #000; transition: opacity 0.2s; }
+  .label b { display: block; font: 600 12px system-ui, sans-serif; letter-spacing: 0.04em; }
+  .label span { color: var(--blood); }
+  .label span.none { color: var(--muted); }
+
+  #drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(4, 5, 10, 0.85); z-index: 10; }
+  #drop.show { display: flex; }
+  #drop .box { padding: 28px 32px; max-width: 460px; text-align: center; border: 1px dashed rgba(255, 42, 42, 0.5); }
+  #drop h2 { margin: 0 0 8px; font-size: 18px; }
+  #drop p { color: var(--muted); margin: 8px 0; }
+  #drop code { font-family: var(--mono); color: var(--text); background: rgba(255, 255, 255, 0.06); padding: 1px 5px; border-radius: 4px; }
+  #drop label { display: inline-block; margin-top: 10px; padding: 8px 14px; border-radius: 6px; cursor: pointer;
+    background: rgba(255, 42, 42, 0.2); border: 1px solid rgba(255, 42, 42, 0.4); }
+  #drop input { display: none; }
+  #drop.dragging .box { border-color: var(--blood); background: rgba(255, 42, 42, 0.08); }
+
+  @media (max-width: 700px) {
+    #cities { top: auto; bottom: 92px; left: 16px; right: 16px; width: auto; max-height: 30vh; }
+    #speeds button:nth-child(1), #speeds button:nth-child(4) { display: none; }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="scene"></div>
+<div id="labels"></div>
+
+<div id="title" class="panel">
+  <h1>Small World <span>Flu</span></h1>
+  <p id="subtitle">Loading…</p>
+  <div id="day-big">Day 0 <small>/ 0</small></div>
+  <div id="total"></div>
+</div>
+
+<div id="cities" class="panel"><button id="globe-view" hidden>← Whole globe</button><div id="city-rows"></div></div>
+
+<div id="timeline" class="panel">
+  <button id="play" title="Play / pause (space)">▶</button>
+  <div id="track">
+    <canvas id="chart"></canvas>
+    <div id="playhead"></div>
+    <input id="scrub" type="range" min="0" max="0" step="0.01" value="0" aria-label="Day">
+  </div>
+  <div id="speeds">
+    <button data-speed="0.5">½×</button><button data-speed="1" class="on">1×</button><button data-speed="2">2×</button><button data-speed="4">4×</button>
+  </div>
+</div>
+
+<div id="drop">
+  <div class="box panel">
+    <h2>Load a simulation run</h2>
+    <p>Drop an <code>epidemic.jsonl</code> here, or serve the repo with <code>make viz</code> to load <code>run/epidemic.jsonl</code> automatically.</p>
+    <label>Choose file<input id="file" type="file" accept=".jsonl,.json,.txt"></label>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+const GLOBE_RADIUS = 100;
+const MAX_CITIES = 16;            // globe shader uniform array size
+const DAYS_PER_SECOND = 1.25;     // playback rate at 1x
+const EARTH_TEXTURE = 'https://cdn.jsdelivr.net/npm/three-globe@2.45.6/example/img/earth-night.jpg';
+const DEFAULT_DATA = '../run/epidemic.jsonl';
+
+// ---------------------------------------------------------------- helpers
+
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/* Two-part heartbeat ("lub-dub") for a phase measured in beats. */
+function heartbeat(phase) {
+  const p = phase - Math.floor(phase);
+  return Math.exp(-(((p - 0.05) / 0.035) ** 2)) + 0.55 * Math.exp(-(((p - 0.22) / 0.045) ** 2));
+}
+const HEARTBEAT_GLSL = /* glsl */`
+  float heartbeat(float phase) {
+    float p = fract(phase);
+    return exp(-pow((p - 0.05) / 0.035, 2.0)) + 0.55 * exp(-pow((p - 0.22) / 0.045, 2.0));
+  }`;
+
+/* Matches the equirectangular mapping of THREE.SphereGeometry. */
+function latLonToDir(lat, lon) {
+  const phi = (90 - lat) * Math.PI / 180, theta = (lon + 180) * Math.PI / 180;
+  return new THREE.Vector3(-Math.sin(phi) * Math.cos(theta), Math.cos(phi), Math.sin(phi) * Math.sin(theta));
+}
+
+function slerpDirs(a, b, t) {
+  const angle = a.angleTo(b);
+  if (angle < 1e-5) return a.clone();
+  const s = Math.sin(angle);
+  return a.clone().multiplyScalar(Math.sin((1 - t) * angle) / s).add(b.clone().multiplyScalar(Math.sin(t * angle) / s));
+}
+
+function mulberry32(seed) {
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function cityColor(i, n) { return `hsl(${Math.round(i * 360 / n + 8) % 360} 60% 64%)`; }
+
+// 3D simplex noise, Stefan Gustavson / Ashima Arts (MIT)
+const NOISE_GLSL = /* glsl */`
+  vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+  vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+  float snoise(vec3 v) {
+    const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
+    const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+    vec3 i = floor(v + dot(v, C.yyy));
+    vec3 x0 = v - i + dot(i, C.xxx);
+    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 l = 1.0 - g;
+    vec3 i1 = min(g.xyz, l.zxy);
+    vec3 i2 = max(g.xyz, l.zxy);
+    vec3 x1 = x0 - i1 + C.xxx;
+    vec3 x2 = x0 - i2 + C.yyy;
+    vec3 x3 = x0 - D.yyy;
+    i = mod289(i);
+    vec4 p = permute(permute(permute(i.z + vec4(0.0, i1.z, i2.z, 1.0)) + i.y + vec4(0.0, i1.y, i2.y, 1.0)) + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+    float n_ = 0.142857142857;
+    vec3 ns = n_ * D.wyz - D.xzx;
+    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+    vec4 x_ = floor(j * ns.z);
+    vec4 y_ = floor(j - 7.0 * x_);
+    vec4 x = x_ * ns.x + ns.yyyy;
+    vec4 y = y_ * ns.x + ns.yyyy;
+    vec4 h = 1.0 - abs(x) - abs(y);
+    vec4 b0 = vec4(x.xy, y.xy);
+    vec4 b1 = vec4(x.zw, y.zw);
+    vec4 s0 = floor(b0) * 2.0 + 1.0;
+    vec4 s1 = floor(b1) * 2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0));
+    vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+    vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+    vec3 p0 = vec3(a0.xy, h.x);
+    vec3 p1 = vec3(a0.zw, h.y);
+    vec3 p2 = vec3(a1.xy, h.z);
+    vec3 p3 = vec3(a1.zw, h.w);
+    vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+    p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+    vec4 m = max(0.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+    m = m * m;
+    return 42.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+  }`;
+
+// ---------------------------------------------------------------- data
+
+/* epidemic.jsonl: a "meta" line, then one "day" line per simulated day.
+   Lines can be appended as they arrive, so a live feed can reuse this. */
+function createRun() {
+  return { meta: null, days: [], peakInfected: 1, routeFirstDay: new Map() };
+}
+
+function ingestLine(run, line) {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.type === 'meta') { run.meta = msg; return; }
+  if (msg.type !== 'day') return;
+  run.days[msg.day] = msg;
+  for (const n of msg.infected) run.peakInfected = Math.max(run.peakInfected, n);
+  for (const [from, to] of msg.imports) {
+    const key = from + '-' + to;
+    if (!run.routeFirstDay.has(key)) run.routeFirstDay.set(key, msg.day);
+  }
+}
+
+function parseRun(text) {
+  const run = createRun();
+  for (const line of text.split('\n')) ingestLine(run, line);
+  if (!run.meta || run.days.length === 0) throw new Error('not an epidemic.jsonl file');
+  return run;
+}
+
+/* Last day worth watching: a few days after the last infection clears. */
+function playbackEnd(run) {
+  let last = 0;
+  run.days.forEach((d, i) => { if (d.infected.some(n => n > 0)) last = i; });
+  return Math.min(run.days.length - 1, last + 4);
+}
+
+function sampleCity(run, day, city, field) {
+  const i0 = clamp(Math.floor(day), 0, run.days.length - 1);
+  const i1 = Math.min(i0 + 1, run.days.length - 1);
+  const t = clamp(day - i0, 0, 1);
+  return lerp(run.days[i0][field][city], run.days[i1][field][city], t * t * (3 - 2 * t));
+}
+
+// ---------------------------------------------------------------- scene
+
+const container = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+container.appendChild(renderer.domElement);
+
+const labelRenderer = new CSS2DRenderer({ element: document.getElementById('labels') });
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x04050a);
+
+const camera = new THREE.PerspectiveCamera(40, 1, 1, 5000);
+camera.position.set(0, 60, 330);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.enablePan = false;
+controls.minDistance = 125;
+controls.maxDistance = 600;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.25;
+controls.rotateSpeed = 0.5;
+
+scene.add(new THREE.AmbientLight(0x8890a8, 0.6));
+const sun = new THREE.DirectionalLight(0xfff1e0, 2.2);
+scene.add(sun);
+const rim = new THREE.DirectionalLight(0xff4040, 0.8);
+scene.add(rim);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.85, 0.55, 0.62);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  bloom.resolution.set(w, h);
+  labelRenderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  drawChart();
+}
+window.addEventListener('resize', resize);
+
+// stars
+{
+  const n = 2500, pos = new Float32Array(n * 3), rand = mulberry32(7);
+  for (let i = 0; i < n; i++) {
+    const v = new THREE.Vector3(rand() * 2 - 1, rand() * 2 - 1, rand() * 2 - 1).normalize().multiplyScalar(1500 + rand() * 1500);
+    pos.set([v.x, v.y, v.z], i * 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x9aa3c0, size: 2.2, sizeAttenuation: false, transparent: true, opacity: 0.7 })));
+}
+
+// globe: night-lights texture plus veiny red stains that spread around infected cities
+const globeUniforms = {
+  uMap: { value: null },
+  uHasMap: { value: 0 },
+  uSunDir: { value: new THREE.Vector3() },
+  uCityCount: { value: 0 },
+  uCityDir: { value: Array.from({ length: MAX_CITIES }, () => new THREE.Vector3()) },
+  uCityLevel: { value: new Float32Array(MAX_CITIES) },
+  uCityBeat: { value: new Float32Array(MAX_CITIES) },
+};
+const globe = new THREE.Mesh(
+  new THREE.SphereGeometry(GLOBE_RADIUS, 128, 96),
+  new THREE.ShaderMaterial({
+    uniforms: globeUniforms,
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      varying vec3 vDir;
+      void main() {
+        vUv = uv;
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uMap;
+      uniform float uHasMap;
+      uniform vec3 uSunDir;
+      uniform int uCityCount;
+      uniform vec3 uCityDir[${MAX_CITIES}];
+      uniform float uCityLevel[${MAX_CITIES}];
+      uniform float uCityBeat[${MAX_CITIES}];
+      varying vec2 vUv;
+      varying vec3 vDir;
+      ${NOISE_GLSL}
+      void main() {
+        vec3 n = normalize(vDir);
+        vec3 base;
+        if (uHasMap > 0.5) {
+          base = texture2D(uMap, vUv).rgb * 1.6 + vec3(0.006, 0.008, 0.016);
+        } else { // no texture: dark ocean with a lat/lon grid
+          vec2 g = abs(fract(vUv * vec2(36.0, 18.0)) - 0.5);
+          base = vec3(0.01, 0.015, 0.03) + vec3(0.03, 0.04, 0.07) * (1.0 - smoothstep(0.0, 0.03, min(g.x, g.y)));
+        }
+        float light = 0.45 + 0.75 * max(dot(n, uSunDir), 0.0);
+        vec3 color = base * light;
+
+        // branching vein pattern: ridges of simplex noise at two scales
+        float v1 = pow(1.0 - abs(snoise(n * 14.0)), 6.0);
+        float v2 = pow(1.0 - abs(snoise(n * 34.0 + 3.1)), 9.0);
+        float veins = max(v1, 0.8 * v2);
+        vec3 stain = vec3(0.0);
+        for (int i = 0; i < ${MAX_CITIES}; i++) {
+          if (i >= uCityCount) break;
+          float level = uCityLevel[i];
+          if (level < 0.002) continue;
+          float angle = acos(clamp(dot(n, uCityDir[i]), -1.0, 1.0));
+          float reach = 0.02 + 0.2 * level;                          // radians across the surface
+          float edge = angle + 0.025 * snoise(n * 7.0 + float(i));   // ragged edge
+          float spread = 1.0 - smoothstep(reach * 0.25, reach, edge);
+          float core = exp(-pow(angle / (reach * 0.3), 2.0));
+          float beat = uCityBeat[i];
+          stain += vec3(1.0, 0.04, 0.03) * level * (veins * spread * (0.7 + 2.2 * beat) + core * (0.35 + 0.8 * beat));
+        }
+        color = color * (1.0 - 0.6 * clamp(stain.r, 0.0, 1.0)) + stain;
+        gl_FragColor = vec4(color, 1.0);
+      }`,
+  })
+);
+scene.add(globe);
+new THREE.TextureLoader().load(EARTH_TEXTURE, tex => {
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  globeUniforms.uMap.value = tex;
+  globeUniforms.uHasMap.value = 1;
+}, undefined, () => console.warn('earth texture unavailable, using plain globe'));
+
+// atmosphere: blue when healthy, bleeding toward red as the world gets sicker
+const atmosphereUniforms = { uColor: { value: new THREE.Color(0x3a6cff) } };
+scene.add(new THREE.Mesh(
+  new THREE.SphereGeometry(GLOBE_RADIUS * 1.08, 64, 48),
+  new THREE.ShaderMaterial({
+    uniforms: atmosphereUniforms,
+    side: THREE.BackSide, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
+    vertexShader: /* glsl */`
+      varying vec3 vNormal;
+      void main() {
+        vNormal = normalize(normalMatrix * normal);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      uniform vec3 uColor;
+      varying vec3 vNormal;
+      void main() {
+        float glow = pow(clamp(0.6 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 0.0, 1.0), 4.0);
+        gl_FragColor = vec4(uColor * glow * 0.8, 1.0);
+      }`,
+  })
+));
+
+// ---------------------------------------------------------------- hospitals
+
+/* Building layout in hospital units (1 unit is about 1/100 of the globe radius
+   at scale 1): a tower with two lower wings. */
+const TOWER = { w: 4, h: 6, d: 3 };
+const WING = { w: 2.5, h: 3.5, d: 2.6 };
+const BASE_SINK = 0.25; // sinks the flat base so its corners meet the curved globe
+
+function windowTextures(cols, rows, rand) {
+  const W = 128, H = 192;
+  const make = () => { const c = document.createElement('canvas'); c.width = W; c.height = H; return c; };
+  const wall = make(), glow = make();
+  const wc = wall.getContext('2d'), gc = glow.getContext('2d');
+  wc.fillStyle = '#c9ced6'; wc.fillRect(0, 0, W, H);
+  gc.fillStyle = '#000'; gc.fillRect(0, 0, W, H);
+  const cw = W / cols, ch = H / rows;
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const x = c * cw + cw * 0.2, y = r * ch + ch * 0.22, w = cw * 0.6, h = ch * 0.5;
+    const lit = rand() < 0.7;
+    wc.fillStyle = lit ? '#e9e2c8' : '#2a3140'; wc.fillRect(x, y, w, h);
+    if (lit) { gc.fillStyle = `rgb(255 ${220 + rand() * 30} ${170 + rand() * 50})`; gc.fillRect(x, y, w, h); }
+  }
+  const out = [new THREE.CanvasTexture(wall), new THREE.CanvasTexture(glow)];
+  out.forEach(t => { t.colorSpace = THREE.SRGBColorSpace; });
+  return out;
+}
+
+/* Surfaces veins can climb: a point on the face's bottom edge, the direction
+   along it, its outward normal, its width and height, and how far a vein can
+   creep across the floor in front of it (the ground, or a wing's roof). */
+function climbableFaces() {
+  const tz = TOWER.d / 2, wz = WING.d / 2, wx = TOWER.w / 2 + WING.w;
+  const face = (origin, along, normal, width, height, creep = 3) => ({ origin: new THREE.Vector3(...origin), along: new THREE.Vector3(...along), normal: new THREE.Vector3(...normal), width, height, creep });
+  return [
+    face([TOWER.w / 2, WING.h, tz], [0, 0, -1], [1, 0, 0], TOWER.d, TOWER.h - WING.h, WING.w * 0.8),
+    face([-TOWER.w / 2, WING.h, -tz], [0, 0, 1], [-1, 0, 0], TOWER.d, TOWER.h - WING.h, WING.w * 0.8),
+    face([-TOWER.w / 2, 0, tz], [1, 0, 0], [0, 0, 1], TOWER.w, TOWER.h),
+    face([TOWER.w / 2, 0, -tz], [-1, 0, 0], [0, 0, -1], TOWER.w, TOWER.h),
+    face([-wx, 0, wz], [1, 0, 0], [0, 0, 1], WING.w, WING.h),
+    face([TOWER.w / 2, 0, wz], [1, 0, 0], [0, 0, 1], WING.w, WING.h),
+    face([-TOWER.w / 2, 0, -wz], [-1, 0, 0], [0, 0, -1], WING.w, WING.h),
+    face([wx, 0, -wz], [-1, 0, 0], [0, 0, -1], WING.w, WING.h),
+    face([-wx, 0, -wz], [0, 0, 1], [-1, 0, 0], WING.d, WING.h),
+    face([wx, 0, wz], [0, 0, -1], [1, 0, 0], WING.d, WING.h),
+  ];
+}
+
+/* Vein tubes that crawl in from the ground and up the walls. Every vertex
+   carries when its vein starts growing (aStart, on the 0..1 infection level)
+   and how much more level it takes to finish (aSpan), so the shader alone
+   decides how far each vein has grown. */
+function veinGeometry(rand) {
+  const faces = climbableFaces();
+  const MAIN_VEINS = 30;
+  const totalArea = faces.reduce((a, f) => a + f.width * f.height, 0);
+  // every wall gets veins, in proportion to its size, in a shuffled growth order
+  const order = faces.flatMap(f => Array(Math.max(2, Math.round(MAIN_VEINS * f.width * f.height / totalArea))).fill(f));
+  for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  const parts = [];
+
+  const addTube = (points, radius, start, span) => {
+    const curve = new THREE.CatmullRomCurve3(points, false, 'centripetal');
+    const g = new THREE.TubeGeometry(curve, Math.max(24, points.length * 8), radius, 6, false);
+    const n = g.attributes.position.count;
+    g.setAttribute('aStart', new THREE.BufferAttribute(new Float32Array(n).fill(start), 1));
+    g.setAttribute('aSpan', new THREE.BufferAttribute(new Float32Array(n).fill(span), 1));
+    g.setAttribute('aRadius', new THREE.BufferAttribute(new Float32Array(n).fill(radius), 1));
+    parts.push(g);
+  };
+
+  order.forEach((f, v) => {
+    const s = 0.15 + rand() * (f.width - 0.3);                     // where on the face it climbs
+    const top = f.height * (0.45 + rand() * 0.6);
+    const offset = 0.07;
+    const points = [];
+    // creep in across the floor, curling as it comes
+    const groundLen = f.creep * (0.4 + rand() * 0.6), sway = (rand() - 0.5) * 2.4, curl = (rand() - 0.5) * 1.6;
+    const floorY = f.origin.y + (f.origin.y > 0 ? 0.07 : 0.04);
+    for (let i = 0; i <= 6; i++) {
+      const t = i / 6, out = 1 - t;
+      const side = clamp(s + sway * out * out + curl * Math.sin(Math.PI * t), -0.6, f.width + 0.6);
+      const p = f.origin.clone().addScaledVector(f.along, side).addScaledVector(f.normal, offset + groundLen * out);
+      p.y = floorY;
+      points.push(p);
+    }
+    // climb the wall, wandering side to side
+    const wobble = 0.25 + rand() * 0.45, freq = 1.2 + rand() * 1.6, phase = rand() * 6.28;
+    const climbTo = Math.min(top, f.height);
+    const steps = Math.ceil(climbTo / 0.5);
+    let along = s;
+    for (let i = 1; i <= steps; i++) {
+      const y = climbTo * i / steps;
+      along = clamp(s + wobble * Math.sin(y * freq + phase) + (rand() - 0.5) * 0.25, 0.08, f.width - 0.08);
+      points.push(f.origin.clone().addScaledVector(f.along, along).addScaledVector(f.normal, offset).setY(f.origin.y + y));
+    }
+    // a few spill over onto the roof
+    if (top > f.height) {
+      for (let i = 1; i <= 2; i++) {
+        points.push(f.origin.clone().addScaledVector(f.along, along + (rand() - 0.5) * 0.4)
+          .addScaledVector(f.normal, -0.45 * i).setY(f.origin.y + f.height + 0.07));
+      }
+    }
+    const start = (v / order.length) * 0.8 + rand() * 0.04;
+    const radius = 0.09 + rand() * 0.07;
+    addTube(points, radius, start, 0.22 + rand() * 0.12);
+
+    // one or two thinner branches off the climbing part, growing a little later
+    const branches = rand() < 0.6 ? 1 + (rand() < 0.4 ? 1 : 0) : 0;
+    for (let b = 0; b < branches; b++) {
+      const k = 5 + Math.floor(rand() * Math.max(1, points.length - 6));
+      const root = points[Math.min(k, points.length - 1)];
+      const dir = rand() < 0.5 ? 1 : -1;
+      const bp = [root.clone()];
+      let cur = root.clone();
+      for (let i = 0; i < 4; i++) {
+        cur = cur.clone().addScaledVector(f.along, dir * (0.25 + rand() * 0.3)).setY(clamp(cur.y + (rand() - 0.3) * 0.5, f.origin.y + 0.1, f.origin.y + f.height - 0.05));
+        bp.push(cur);
+      }
+      addTube(bp, radius * 0.55, start + 0.12 + rand() * 0.1, 0.18);
+    }
+  });
+  return mergeGeometries(parts);
+}
+
+const veinShader = {
+  vertexShader: /* glsl */`
+    attribute float aStart;
+    attribute float aSpan;
+    attribute float aRadius;
+    uniform float uLevel;
+    uniform float uPhase;
+    varying float vAlong;
+    varying float vGrown;
+    varying float vBeat;
+    varying vec3 vNormal;
+    varying vec3 vView;
+    ${HEARTBEAT_GLSL}
+    void main() {
+      float along = uv.x;                                   // 0 at the root, 1 at the tip
+      float grown = clamp((uLevel - aStart) / aSpan, 0.0, 1.0);
+      float tip = 1.0 - smoothstep(grown - 0.12, grown, along);
+      float beat = heartbeat(uPhase - along * 0.9);         // pulse travels up the vein
+      float root = smoothstep(0.0, 0.07, along);
+      float thickness = mix(1.0, 0.4, along) * root * tip * (1.0 + 0.4 * beat);
+      vec3 p = position - normal * aRadius * (1.0 - thickness);
+      vAlong = along; vGrown = grown; vBeat = beat;
+      vNormal = normalize(normalMatrix * normal);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vView = -mv.xyz;
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */`
+    uniform float uLevel;
+    varying float vAlong;
+    varying float vGrown;
+    varying float vBeat;
+    varying vec3 vNormal;
+    varying vec3 vView;
+    void main() {
+      if (vAlong > vGrown || vGrown <= 0.0) discard;
+      vec3 n = normalize(vNormal);
+      float facing = abs(dot(n, normalize(vView)));
+      float fresnel = pow(1.0 - facing, 2.0);
+      vec3 flesh = mix(vec3(0.12, 0.0, 0.01), vec3(0.42, 0.01, 0.03), facing);
+      vec3 glow = vec3(1.0, 0.06, 0.04) * (0.35 * fresnel + vBeat * (0.6 + 2.4 * uLevel));
+      gl_FragColor = vec4(flesh + glow, 1.0);
+    }`,
+};
+
+function makeHospital(city, index) {
+  const rand = mulberry32(1000 + index * 97);
+  const group = new THREE.Group();
+  const dir = latLonToDir(city.lat, city.lon);
+  group.position.copy(dir).multiplyScalar(GLOBE_RADIUS);
+  group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+  group.rotateY(rand() * Math.PI * 2);
+
+  const building = new THREE.Group();
+  building.position.y = -BASE_SINK;
+  group.add(building);
+
+  const [towerWall, towerGlow] = windowTextures(5, 9, rand);
+  const [wingWall, wingGlow] = windowTextures(3, 5, rand);
+  const roof = new THREE.MeshStandardMaterial({ color: 0x8d939e, roughness: 0.9 });
+  const windowsMaterial = (map, emissiveMap) => new THREE.MeshStandardMaterial({ map, emissiveMap, emissive: 0xffffff, emissiveIntensity: 0.6, roughness: 0.65 });
+  const towerMat = windowsMaterial(towerWall, towerGlow), wingMat = windowsMaterial(wingWall, wingGlow);
+  const boxWithRoof = (w, h, d, mat) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), [mat, mat, roof, roof, mat, mat]);
+    m.position.y = h / 2;
+    return m;
+  };
+  building.add(boxWithRoof(TOWER.w, TOWER.h, TOWER.d, towerMat));
+  for (const side of [-1, 1]) {
+    const wing = boxWithRoof(WING.w, WING.h, WING.d, wingMat);
+    wing.position.x = side * (TOWER.w / 2 + WING.w / 2);
+    building.add(wing);
+  }
+  const canopy = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.15, 0.9), roof);
+  canopy.position.set(0, 1.2, TOWER.d / 2 + 0.45);
+  building.add(canopy);
+
+  const crossMat = new THREE.MeshStandardMaterial({ color: 0xff2020, emissive: 0xff1010, emissiveIntensity: 1.5 });
+  const addCross = (x, y, z, rotX) => {
+    const c = new THREE.Group();
+    c.add(new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.32, 0.08), crossMat));
+    c.add(new THREE.Mesh(new THREE.BoxGeometry(0.32, 1.0, 0.08), crossMat));
+    c.position.set(x, y, z);
+    c.rotation.x = rotX;
+    building.add(c);
+  };
+  addCross(0, TOWER.h - 0.9, TOWER.d / 2 + 0.05, 0);
+  addCross(0, TOWER.h + 0.05, 0, -Math.PI / 2);
+
+  const veinUniforms = { uLevel: { value: 0 }, uPhase: { value: 0 } };
+  const veins = new THREE.Mesh(veinGeometry(rand), new THREE.ShaderMaterial({ uniforms: veinUniforms, ...veinShader }));
+  veins.frustumCulled = false;
+  building.add(veins);
+
+  const el = document.createElement('div');
+  el.className = 'label';
+  el.innerHTML = `<b></b><span></span>`;
+  el.querySelector('b').textContent = city.name;
+  const label = new CSS2DObject(el);
+  label.position.set(0, TOWER.h + 2.2, 0);
+  group.add(label);
+
+  scene.add(group);
+  return {
+    city, dir, group, building, towerMat, wingMat, crossMat, veinUniforms, label, el,
+    countEl: el.querySelector('span'),
+    level: 0, phase: rand(), beat: 0,
+  };
+}
+
+const HEALTHY_WINDOWS = new THREE.Color(0xfff0d0), SICK_WINDOWS = new THREE.Color(0xff3020);
+
+function updateHospital(h, targetLevel, infected, dt) {
+  h.level += (targetLevel - h.level) * (1 - Math.exp(-dt * 5));
+  const level = h.level;
+  const bpm = 40 + 140 * level;                 // more sick people, faster heart
+  h.phase += dt * bpm / 60;
+  h.beat = heartbeat(h.phase);
+  const size = 1.1 + 2.4 * level;                // and a bigger hospital
+  h.group.scale.setScalar(size * (1 + (0.02 + 0.1 * level) * h.beat));
+
+  h.veinUniforms.uLevel.value = level;
+  h.veinUniforms.uPhase.value = h.phase;
+  const windows = HEALTHY_WINDOWS.clone().lerp(SICK_WINDOWS, clamp(level * 1.4, 0, 1));
+  for (const m of [h.towerMat, h.wingMat]) {
+    m.emissive.copy(windows);
+    m.emissiveIntensity = 0.45 + level * (0.6 + 1.6 * h.beat);
+  }
+  h.crossMat.emissiveIntensity = 1.2 + h.beat * (0.5 + 4 * level);
+  h.countEl.textContent = Math.round(infected).toLocaleString() + ' sick';
+  h.countEl.classList.toggle('none', infected < 1);
+}
+
+// ---------------------------------------------------------------- infection arcs
+
+const arcGroup = new THREE.Group();
+scene.add(arcGroup);
+const routes = new Map();     // "from-to" -> faint permanent trail
+let liveArcs = [];            // pulses currently travelling
+
+function arcGeometry(a, b, radius) {
+  const angle = a.angleTo(b), height = 6 + 40 * angle / Math.PI, points = [];
+  for (let i = 0; i <= 48; i++) {
+    const t = i / 48;
+    points.push(slerpDirs(a, b, t).multiplyScalar(GLOBE_RADIUS + 0.5 + height * Math.sin(Math.PI * t)));
+  }
+  return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 96, radius, 6, false);
+}
+
+const pulseShader = {
+  vertexShader: /* glsl */`
+    varying float vAlong;
+    void main() { vAlong = uv.x; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: /* glsl */`
+    uniform float uHead;
+    uniform float uFade;
+    varying float vAlong;
+    void main() {
+      float head = exp(-pow((vAlong - uHead) / 0.035, 2.0));
+      float tail = smoothstep(uHead - 0.4, uHead, vAlong) * step(vAlong, uHead) * 0.55;
+      gl_FragColor = vec4(vec3(1.0, 0.1, 0.06) * (head * 3.0 + tail) * uFade, 1.0);
+    }`,
+};
+
+function launchArc(hospitals, from, to, count) {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uHead: { value: 0 }, uFade: { value: 1 } }, ...pulseShader,
+    blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
+  });
+  const radius = 0.35 + Math.min(count, 10) * 0.06;
+  const mesh = new THREE.Mesh(arcGeometry(hospitals[from].dir, hospitals[to].dir, radius), mat);
+  arcGroup.add(mesh);
+  liveArcs.push({ mesh, age: 0 });
+}
+
+function updateArcs(dt) {
+  liveArcs = liveArcs.filter(arc => {
+    arc.age += dt;
+    const u = arc.mesh.material.uniforms;
+    u.uHead.value = arc.age / 1.4 * 1.15;
+    u.uFade.value = clamp(2.2 - arc.age, 0, 1);
+    if (arc.age < 2.2) return true;
+    arcGroup.remove(arc.mesh);
+    arc.mesh.geometry.dispose();
+    arc.mesh.material.dispose();
+    return false;
+  });
+}
+
+function updateRoutes(run, hospitals, day) {
+  for (const [key, firstDay] of run.routeFirstDay) {
+    let route = routes.get(key);
+    if (!route) {
+      const [from, to] = key.split('-').map(Number);
+      route = new THREE.Mesh(arcGeometry(hospitals[from].dir, hospitals[to].dir, 0.18),
+        new THREE.MeshBasicMaterial({ color: 0xff2a2a, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false }));
+      arcGroup.add(route);
+      routes.set(key, route);
+    }
+    route.visible = day >= firstDay;
+  }
+}
+
+// ---------------------------------------------------------------- UI
+
+const ui = {
+  subtitle: document.getElementById('subtitle'),
+  dayBig: document.getElementById('day-big'),
+  total: document.getElementById('total'),
+  cities: document.getElementById('city-rows'),
+  globeButton: document.getElementById('globe-view'),
+  play: document.getElementById('play'),
+  scrub: document.getElementById('scrub'),
+  chart: document.getElementById('chart'),
+  playhead: document.getElementById('playhead'),
+  drop: document.getElementById('drop'),
+  file: document.getElementById('file'),
+};
+
+const state = { run: null, hospitals: [], day: 0, playing: false, speed: 1, endDay: 0, cityRows: [], flight: null, focus: null };
+
+function drawChart() {
+  const run = state.run, c = ui.chart;
+  const w = c.clientWidth, h = c.clientHeight, dpr = Math.min(window.devicePixelRatio, 2);
+  c.width = w * dpr; c.height = h * dpr;
+  const ctx = c.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  if (!run) return;
+  const shown = run.days.slice(0, state.endDay + 1), n = run.meta.cities.length, x = d => d / Math.max(1, state.endDay) * w;
+  const totals = shown.map(d => d.infected.reduce((a, b) => a + b, 0));
+  const peakTotal = Math.max(1, ...totals);
+  // total sick, as a filled area
+  ctx.beginPath(); ctx.moveTo(0, h);
+  totals.forEach((t, d) => ctx.lineTo(x(d), h - 2 - (h - 6) * t / peakTotal));
+  ctx.lineTo(w, h); ctx.closePath();
+  const fill = ctx.createLinearGradient(0, 0, 0, h);
+  fill.addColorStop(0, 'rgba(255,42,42,0.35)'); fill.addColorStop(1, 'rgba(255,42,42,0.02)');
+  ctx.fillStyle = fill; ctx.fill();
+  // each city's curve
+  for (let i = 0; i < n; i++) {
+    ctx.beginPath();
+    shown.forEach((d, j) => { const y = h - 2 - (h - 6) * d.infected[i] / run.peakInfected; j ? ctx.lineTo(x(j), y) : ctx.moveTo(x(j), y); });
+    ctx.strokeStyle = cityColor(i, n); ctx.globalAlpha = 0.75; ctx.lineWidth = 1.2; ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function buildCityList() {
+  const run = state.run, n = run.meta.cities.length;
+  ui.cities.innerHTML = '';
+  state.cityRows = run.meta.cities.map((city, i) => {
+    const row = document.createElement('div');
+    row.className = 'city';
+    row.innerHTML = `<span class="dot"></span><span class="name"></span><span class="count"></span><span class="bar"><i></i></span>`;
+    row.querySelector('.dot').style.background = cityColor(i, n);
+    row.querySelector('.name').textContent = city.name + (i === run.meta.seedCity ? ' ·  patient zero' : '');
+    row.addEventListener('click', () => flyTo(state.hospitals[i]));
+    ui.cities.appendChild(row);
+    return { count: row.querySelector('.count'), bar: row.querySelector('.bar i') };
+  });
+}
+
+function updateUI() {
+  const run = state.run, day = state.day, n = run.meta.cities.length;
+  ui.dayBig.innerHTML = `Day ${Math.floor(day)} <small>/ ${state.endDay}</small>`;
+  let sick = 0;
+  for (let i = 0; i < n; i++) {
+    const infected = sampleCity(run, day, i, 'infected');
+    sick += infected;
+    const row = state.cityRows[i];
+    row.count.textContent = Math.round(infected).toLocaleString();
+    row.count.classList.toggle('hot', infected >= 1);
+    row.bar.style.width = (100 * infected / run.meta.population).toFixed(1) + '%';
+  }
+  ui.total.innerHTML = `<b>${Math.round(sick).toLocaleString()}</b> sick of ${(run.meta.population * n).toLocaleString()}`;
+  ui.scrub.value = day;
+  ui.playhead.style.left = (100 * day / Math.max(1, state.endDay)) + '%';
+  ui.play.textContent = state.playing ? '❚❚' : '▶';
+}
+
+function setPlaying(on) {
+  if (on && state.day >= state.endDay) state.day = 0;
+  state.playing = on;
+  if (on) controls.autoRotate = true;
+}
+
+ui.play.addEventListener('click', () => setPlaying(!state.playing));
+ui.globeButton.addEventListener('click', () => flyTo(null));
+ui.scrub.addEventListener('input', () => { state.day = Number(ui.scrub.value); state.playing = false; });
+document.querySelectorAll('#speeds button').forEach(b => b.addEventListener('click', () => {
+  state.speed = Number(b.dataset.speed);
+  document.querySelectorAll('#speeds button').forEach(x => x.classList.toggle('on', x === b));
+}));
+window.addEventListener('keydown', e => {
+  if (!state.run) return;
+  if (e.code === 'Space') { e.preventDefault(); setPlaying(!state.playing); }
+  if (e.code === 'ArrowRight') { state.playing = false; state.day = Math.min(state.endDay, Math.floor(state.day) + 1); }
+  if (e.code === 'ArrowLeft') { state.playing = false; state.day = Math.max(0, Math.ceil(state.day) - 1); }
+});
+controls.addEventListener('start', () => { controls.autoRotate = false; });
+
+// a click (not a drag) on a hospital flies to it
+const raycaster = new THREE.Raycaster(), pointer = new THREE.Vector2();
+let pressedAt = null;
+renderer.domElement.addEventListener('pointerdown', e => { pressedAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!pressedAt || Math.hypot(e.clientX - pressedAt[0], e.clientY - pressedAt[1]) > 5) return;
+  pointer.set(e.clientX / window.innerWidth * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  const hit = raycaster.intersectObjects([globe, ...state.hospitals.map(h => h.building)], true)[0];
+  const h = hit && state.hospitals.find(x => x.building === hit.object.parent || x.building === hit.object.parent?.parent);
+  if (h) flyTo(h);
+});
+window.addEventListener('keydown', e => { if (e.code === 'Escape' && state.focus) flyTo(null); });
+
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+/* Overview: orbit the globe's center. Close-up: orbit a hospital, with "up"
+   along its surface normal so the camera stays above its horizon. */
+function viewFor(h) {
+  if (!h) {
+    const dir = (state.focus ? state.focus.dir : camera.position).clone().normalize();
+    return { pos: dir.multiplyScalar(330).add(new THREE.Vector3(0, 40, 0)), target: new THREE.Vector3(), up: WORLD_UP.clone(),
+      minDistance: 125, maxDistance: 600, maxPolarAngle: Math.PI };
+  }
+  const up = h.dir.clone();
+  const north = WORLD_UP.clone().addScaledVector(up, -up.y);
+  if (north.lengthSq() < 1e-4) north.set(1, 0, 0);
+  north.normalize();
+  const target = up.clone().multiplyScalar(GLOBE_RADIUS + 11);
+  return { pos: target.clone().addScaledVector(up, 44).addScaledVector(north, -88), target, up,
+    minDistance: 20, maxDistance: 170, maxPolarAngle: 1.42 };
+}
+
+function applyView(v) {
+  camera.position.copy(v.pos);
+  camera.up.copy(v.up);
+  controls.target.copy(v.target);
+  controls.minDistance = v.minDistance;
+  controls.maxDistance = v.maxDistance;
+  controls.maxPolarAngle = v.maxPolarAngle;
+  // OrbitControls only reads camera.up when constructed
+  controls._quat.setFromUnitVectors(camera.up, WORLD_UP);
+  controls._quatInverse.copy(controls._quat).invert();
+  camera.lookAt(v.target);
+}
+
+function flyTo(h) {
+  if (h === state.focus) h = null;
+  state.flight = { from: { pos: camera.position.clone(), target: controls.target.clone(), up: camera.up.clone() }, to: viewFor(h), t: 0 };
+  state.focus = h;
+  controls.enabled = false;
+  ui.globeButton.hidden = !h;
+}
+
+function updateFlight(dt) {
+  const f = state.flight;
+  f.t = Math.min(1, f.t + dt / 1.8);
+  const e = f.t * f.t * (3 - 2 * f.t);
+  const a = f.from.pos.clone().normalize(), b = f.to.pos.clone().normalize();
+  const lift = 90 * Math.sin(Math.PI * e) * a.angleTo(b) / Math.PI;   // arc up and over the globe
+  camera.position.copy(slerpDirs(a, b, e)).multiplyScalar(lerp(f.from.pos.length(), f.to.pos.length(), e) + lift);
+  camera.up.copy(slerpDirs(f.from.up, f.to.up, e));
+  const target = f.from.target.clone().lerp(f.to.target, e);
+  camera.lookAt(target);
+  if (f.t >= 1) {
+    applyView(f.to);
+    controls.enabled = true;
+    controls.autoRotate = true;
+    state.flight = null;
+  }
+}
+
+// file loading: fetch the run next to the repo, or drop / choose a file
+function loadRun(text) {
+  const run = parseRun(text);
+  if (run.meta.cities.length > MAX_CITIES) throw new Error(`the globe shows at most ${MAX_CITIES} cities`);
+  for (const h of state.hospitals) scene.remove(h.group);
+  for (const r of routes.values()) arcGroup.remove(r);
+  routes.clear();
+  state.run = run;
+  state.hospitals = run.meta.cities.map(makeHospital);
+  state.endDay = playbackEnd(run);
+  state.day = 0;
+  globeUniforms.uCityCount.value = run.meta.cities.length;
+  state.hospitals.forEach((h, i) => globeUniforms.uCityDir.value[i].copy(h.dir));
+  ui.scrub.max = state.endDay;
+  const n = run.meta.cities.length;
+  ui.subtitle.textContent = `${n} cities · ${run.meta.population.toLocaleString()} people each · starts in ${run.meta.cities[run.meta.seedCity]?.name ?? 'every city'}`;
+  buildCityList();
+  drawChart();
+  ui.drop.classList.remove('show');
+  // ?day=N opens paused on that day; ?city=Name looks at that city up close
+  const focus = state.hospitals.find(h => h.city.name.toLowerCase() === (params.get('city') || '').toLowerCase());
+  state.focus = null;
+  state.flight = null;
+  if (focus) {
+    applyView(viewFor(focus));
+    state.focus = focus;
+  } else {
+    const seed = state.hospitals[run.meta.seedCity] ?? state.hospitals[0];
+    applyView({ ...viewFor(null), pos: seed.dir.clone().multiplyScalar(330).add(new THREE.Vector3(0, 40, 0)) });
+  }
+  ui.globeButton.hidden = !focus;
+  if (params.has('day')) {
+    state.day = clamp(Number(params.get('day')) || 0, 0, state.endDay);
+    state.hospitals.forEach((h, i) => { h.level = Math.sqrt(sampleCity(run, state.day, i, 'infected') / run.peakInfected); });
+  } else {
+    setTimeout(() => setPlaying(true), 900);
+  }
+}
+
+function showDrop(message) {
+  ui.drop.classList.add('show');
+  if (message) ui.drop.querySelector('p').textContent = message;
+}
+
+async function readFile(file) {
+  try { loadRun(await file.text()); } catch (err) { showDrop(`Couldn't read ${file.name}: ${err.message}`); }
+}
+ui.file.addEventListener('change', () => ui.file.files[0] && readFile(ui.file.files[0]));
+window.addEventListener('dragover', e => { e.preventDefault(); ui.drop.classList.add('show', 'dragging'); });
+window.addEventListener('dragleave', e => { if (!e.relatedTarget) ui.drop.classList.remove('dragging'); });
+window.addEventListener('drop', e => {
+  e.preventDefault(); ui.drop.classList.remove('dragging');
+  if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
+});
+
+const params = new URLSearchParams(location.search);
+const dataUrl = params.get('data') || DEFAULT_DATA;
+fetch(dataUrl)
+  .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
+  .then(loadRun)
+  .catch(() => showDrop());
+
+// ---------------------------------------------------------------- frame loop
+
+const timer = new THREE.Timer();
+const cameraDir = new THREE.Vector3();
+const HEALTHY_SKY = new THREE.Color(0x3a6cff), SICK_SKY = new THREE.Color(0xff1a1a);
+
+function frame(time) {
+  timer.update(time);
+  const dt = Math.min(timer.getDelta(), 0.1);
+  const run = state.run;
+
+  if (state.flight) updateFlight(dt);
+  else controls.update();
+  cameraDir.copy(camera.position).normalize();
+  sun.position.copy(camera.position).applyAxisAngle(new THREE.Vector3(0, 1, 0), 0.6).add(new THREE.Vector3(0, 120, 0));
+  rim.position.copy(camera.position).multiplyScalar(-1);
+  globeUniforms.uSunDir.value.copy(sun.position).normalize();
+
+  if (run) {
+    if (state.playing) {
+      const before = Math.floor(state.day);
+      state.day = Math.min(state.endDay, state.day + dt * DAYS_PER_SECOND * state.speed);
+      for (let d = before + 1; d <= Math.floor(state.day); d++)
+        for (const [from, to, count] of run.days[d].imports) launchArc(state.hospitals, from, to, count);
+      if (state.day >= state.endDay) state.playing = false;
+    }
+    let worldLevel = 0;
+    state.hospitals.forEach((h, i) => {
+      const infected = sampleCity(run, state.day, i, 'infected');
+      updateHospital(h, Math.sqrt(infected / run.peakInfected), infected, dt);
+      globeUniforms.uCityLevel.value[i] = h.level;
+      globeUniforms.uCityBeat.value[i] = h.beat;
+      worldLevel = Math.max(worldLevel, h.level);
+      const facing = h.dir.dot(cameraDir);
+      h.el.style.opacity = facing > 0.15 ? 1 : 0;
+    });
+    const sick = worldLevel * 0.85;
+    atmosphereUniforms.uColor.value.copy(HEALTHY_SKY).multiplyScalar((1 - sick) ** 2).add(SICK_SKY.clone().multiplyScalar(sick));
+    updateRoutes(run, state.hospitals, state.day);
+    updateUI();
+  }
+  updateArcs(dt);
+
+  composer.render();
+  labelRenderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+resize();
+frame();
+</script>
+</body>
+</html>
