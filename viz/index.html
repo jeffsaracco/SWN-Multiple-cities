@@ -31,6 +31,9 @@
   #day-big small { font-size: 13px; color: var(--muted); font-weight: 400; }
   #total { color: var(--muted); font: 12px var(--mono); margin-top: 4px; }
   #total b { color: var(--blood); font-weight: 600; }
+  #links-legend { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font: 12px var(--mono); }
+  #links-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  #links-legend i { width: 14px; height: 3px; border-radius: 2px; }
 
   #cities { position: fixed; top: 16px; right: 16px; width: 250px; max-height: calc(100vh - 150px);
     overflow-y: auto; padding: 6px; }
@@ -101,6 +104,7 @@
   <p id="subtitle">Loading…</p>
   <div id="day-big">Day 0 <small>/ 0</small></div>
   <div id="total"></div>
+  <div id="links-legend" hidden></div>
 </div>
 
 <div id="cities" class="panel"><button id="globe-view" hidden>← Whole globe</button><div id="city-rows"></div></div>
@@ -232,20 +236,16 @@ const NOISE_GLSL = /* glsl */`
 /* epidemic.jsonl: a "meta" line, then one "day" line per simulated day.
    Lines can be appended as they arrive, so a live feed can reuse this. */
 function createRun() {
-  return { meta: null, days: [], peakInfected: 1, routeFirstDay: new Map() };
+  return { meta: null, days: [], peakInfected: 1 };
 }
 
 function ingestLine(run, line) {
   if (!line.trim()) return;
   const msg = JSON.parse(line);
-  if (msg.type === 'meta') { run.meta = msg; return; }
+  if (msg.type === 'meta') { run.meta = { links: [], ...msg }; return; }
   if (msg.type !== 'day') return;
-  run.days[msg.day] = msg;
+  run.days[msg.day] = { linkStates: '', ...msg };
   for (const n of msg.infected) run.peakInfected = Math.max(run.peakInfected, n);
-  for (const [from, to] of msg.imports) {
-    const key = from + '-' + to;
-    if (!run.routeFirstDay.has(key)) run.routeFirstDay.set(key, msg.day);
-  }
 }
 
 function parseRun(text) {
@@ -687,20 +687,59 @@ function updateHospital(h, targetLevel, infected, dt) {
   h.countEl.classList.toggle('none', infected < 1);
 }
 
-// ---------------------------------------------------------------- infection arcs
+// ---------------------------------------------------------------- cross-city links
 
 const arcGroup = new THREE.Group();
 scene.add(arcGroup);
-const routes = new Map();     // "from-to" -> faint permanent trail
-let liveArcs = [];            // pulses currently travelling
+let links = [];               // one per cross-city edge: { a, b, curve, mesh }
+let liveArcs = [];            // infection pulses currently travelling
+const LINK_COLORS = [new THREE.Color(0x2fd36a), new THREE.Color(0xffc93a), new THREE.Color(0xff2a2a)]; // healthy, one sick, both sick
 
-function arcGeometry(a, b, radius) {
+/* A great-circle arc from a to b, pushed sideways by `fan` at its middle so
+   several links between the same two cities sit side by side. */
+function arcCurve(a, b, fan = 0) {
   const angle = a.angleTo(b), height = 6 + 40 * angle / Math.PI, points = [];
+  const side = new THREE.Vector3().crossVectors(a, b).normalize();
   for (let i = 0; i <= 48; i++) {
-    const t = i / 48;
-    points.push(slerpDirs(a, b, t).multiplyScalar(GLOBE_RADIUS + 0.5 + height * Math.sin(Math.PI * t)));
+    const t = i / 48, lift = Math.sin(Math.PI * t);
+    points.push(slerpDirs(a, b, t).multiplyScalar(GLOBE_RADIUS + 0.5 + height * lift).addScaledVector(side, fan * lift));
   }
-  return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 96, radius, 6, false);
+  return new THREE.CatmullRomCurve3(points);
+}
+
+function buildLinks(run, hospitals) {
+  for (const l of links) { arcGroup.remove(l.mesh); l.mesh.geometry.dispose(); l.mesh.material.dispose(); }
+  const byPair = new Map();
+  run.meta.links.forEach(([a, b], i) => {
+    const key = a + '-' + b;
+    if (!byPair.has(key)) byPair.set(key, []);
+    byPair.get(key).push(i);
+  });
+  links = [];
+  for (const indexes of byPair.values()) {
+    indexes.forEach((li, k) => {
+      const [a, b] = run.meta.links[li];
+      const A = hospitals[a].dir, B = hospitals[b].dir;
+      const spacing = clamp(A.angleTo(B) * 8, 0.8, 2.5);
+      const curve = arcCurve(A, B, (k - (indexes.length - 1) / 2) * spacing);
+      const mesh = new THREE.Mesh(new THREE.TubeGeometry(curve, 96, 0.3, 6, false),
+        new THREE.MeshBasicMaterial({ color: LINK_COLORS[0].clone(), transparent: true, opacity: 0.9, depthWrite: false }));
+      arcGroup.add(mesh);
+      links[li] = { a, b, curve, mesh };
+    });
+  }
+}
+
+/* Eases each link toward today's color; returns how many links are in each state. */
+function updateLinks(run, day, dt) {
+  const states = run.days[clamp(Math.floor(day), 0, run.days.length - 1)].linkStates;
+  const counts = [0, 0, 0];
+  links.forEach((l, i) => {
+    const s = Number(states[i] ?? 0);
+    counts[s]++;
+    l.mesh.material.color.lerp(LINK_COLORS[s], 1 - Math.exp(-dt * 8));
+  });
+  return counts;
 }
 
 const pulseShader = {
@@ -710,23 +749,33 @@ const pulseShader = {
   fragmentShader: /* glsl */`
     uniform float uHead;
     uniform float uFade;
+    uniform float uReverse;
     varying float vAlong;
     void main() {
-      float head = exp(-pow((vAlong - uHead) / 0.035, 2.0));
-      float tail = smoothstep(uHead - 0.4, uHead, vAlong) * step(vAlong, uHead) * 0.55;
+      float along = uReverse > 0.5 ? 1.0 - vAlong : vAlong;
+      float head = exp(-pow((along - uHead) / 0.035, 2.0));
+      float tail = smoothstep(uHead - 0.4, uHead, along) * step(along, uHead) * 0.55;
       gl_FragColor = vec4(vec3(1.0, 0.1, 0.06) * (head * 3.0 + tail) * uFade, 1.0);
     }`,
 };
 
-function launchArc(hospitals, from, to, count) {
-  const mat = new THREE.ShaderMaterial({
-    uniforms: { uHead: { value: 0 }, uFade: { value: 1 } }, ...pulseShader,
-    blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
-  });
-  const radius = 0.35 + Math.min(count, 10) * 0.06;
-  const mesh = new THREE.Mesh(arcGeometry(hospitals[from].dir, hospitals[to].dir, radius), mat);
-  arcGroup.add(mesh);
-  liveArcs.push({ mesh, age: 0 });
+/* Sends a red pulse from one city to another along links between them that
+   have a sick end today (or straight across, for runs without links). */
+function launchArc(run, hospitals, day, from, to, count) {
+  const states = run.days[day].linkStates;
+  const between = links.filter(l => l && ((l.a === from && l.b === to) || (l.a === to && l.b === from)));
+  const sickLinks = between.filter(l => Number(states[links.indexOf(l)]) > 0);
+  const paths = (sickLinks.length ? sickLinks : between).slice(0, Math.min(count, 3));
+  if (!paths.length) paths.push({ a: from, curve: arcCurve(hospitals[from].dir, hospitals[to].dir) });
+  for (const l of paths) {
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uHead: { value: 0 }, uFade: { value: 1 }, uReverse: { value: l.a === from ? 0 : 1 } }, ...pulseShader,
+      blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(new THREE.TubeGeometry(l.curve, 96, 0.42, 6, false), mat);
+    arcGroup.add(mesh);
+    liveArcs.push({ mesh, age: 0 });
+  }
 }
 
 function updateArcs(dt) {
@@ -743,26 +792,13 @@ function updateArcs(dt) {
   });
 }
 
-function updateRoutes(run, hospitals, day) {
-  for (const [key, firstDay] of run.routeFirstDay) {
-    let route = routes.get(key);
-    if (!route) {
-      const [from, to] = key.split('-').map(Number);
-      route = new THREE.Mesh(arcGeometry(hospitals[from].dir, hospitals[to].dir, 0.18),
-        new THREE.MeshBasicMaterial({ color: 0xff2a2a, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false }));
-      arcGroup.add(route);
-      routes.set(key, route);
-    }
-    route.visible = day >= firstDay;
-  }
-}
-
 // ---------------------------------------------------------------- UI
 
 const ui = {
   subtitle: document.getElementById('subtitle'),
   dayBig: document.getElementById('day-big'),
   total: document.getElementById('total'),
+  legend: document.getElementById('links-legend'),
   cities: document.getElementById('city-rows'),
   globeButton: document.getElementById('globe-view'),
   play: document.getElementById('play'),
@@ -817,7 +853,7 @@ function buildCityList() {
   });
 }
 
-function updateUI() {
+function updateUI(linkCounts) {
   const run = state.run, day = state.day, n = run.meta.cities.length;
   ui.dayBig.innerHTML = `Day ${Math.floor(day)} <small>/ ${state.endDay}</small>`;
   let sick = 0;
@@ -830,6 +866,9 @@ function updateUI() {
     row.bar.style.width = (100 * infected / run.meta.population).toFixed(1) + '%';
   }
   ui.total.innerHTML = `<b>${Math.round(sick).toLocaleString()}</b> sick of ${(run.meta.population * n).toLocaleString()}`;
+  ui.legend.hidden = links.length === 0;
+  ui.legend.innerHTML = ['both healthy', 'one sick', 'both sick'].map((label, s) =>
+    `<span><i style="background:#${LINK_COLORS[s].getHexString()}"></i>${linkCounts[s]} ${label}</span>`).join('');
   ui.scrub.value = day;
   ui.playhead.style.left = (100 * day / Math.max(1, state.endDay)) + '%';
   ui.play.textContent = state.playing ? '❚❚' : '▶';
@@ -933,10 +972,9 @@ function loadRun(text) {
   const run = parseRun(text);
   if (run.meta.cities.length > MAX_CITIES) throw new Error(`the globe shows at most ${MAX_CITIES} cities`);
   for (const h of state.hospitals) scene.remove(h.group);
-  for (const r of routes.values()) arcGroup.remove(r);
-  routes.clear();
   state.run = run;
   state.hospitals = run.meta.cities.map(makeHospital);
+  buildLinks(run, state.hospitals);
   state.endDay = playbackEnd(run);
   state.day = 0;
   globeUniforms.uCityCount.value = run.meta.cities.length;
@@ -962,6 +1000,7 @@ function loadRun(text) {
   if (params.has('day')) {
     state.day = clamp(Number(params.get('day')) || 0, 0, state.endDay);
     state.hospitals.forEach((h, i) => { h.level = Math.sqrt(sampleCity(run, state.day, i, 'infected') / run.peakInfected); });
+    updateLinks(run, state.day, Infinity); // start on that day's colors
   } else {
     setTimeout(() => setPlaying(true), 900);
   }
@@ -1013,7 +1052,7 @@ function frame(time) {
       const before = Math.floor(state.day);
       state.day = Math.min(state.endDay, state.day + dt * DAYS_PER_SECOND * state.speed);
       for (let d = before + 1; d <= Math.floor(state.day); d++)
-        for (const [from, to, count] of run.days[d].imports) launchArc(state.hospitals, from, to, count);
+        for (const [from, to, count] of run.days[d].imports) launchArc(run, state.hospitals, d, from, to, count);
       if (state.day >= state.endDay) state.playing = false;
     }
     let worldLevel = 0;
@@ -1027,9 +1066,8 @@ function frame(time) {
       h.el.style.opacity = facing > 0.15 ? 1 : 0;
     });
     const sick = worldLevel * 0.85;
-    atmosphereUniforms.uColor.value.copy(HEALTHY_SKY).multiplyScalar((1 - sick) ** 2).add(SICK_SKY.clone().multiplyScalar(sick));
-    updateRoutes(run, state.hospitals, state.day);
-    updateUI();
+    atmosphereUniforms.uColor.value.copy(HEALTHY_SKY).multiplyScalar(clamp(1 - 2.5 * sick, 0, 1)).add(SICK_SKY.clone().multiplyScalar(sick));
+    updateUI(updateLinks(run, state.day, dt));
   }
   updateArcs(dt);
 

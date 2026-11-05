@@ -7,7 +7,8 @@ The population is split into several "cities", each running as its own process
 between people in different cities. Those cross-city edges are how the flu
 travels from one city to another. A 3D globe replays the run: each city is a
 hospital that grows, beats faster, and gets covered in red veins as more of its
-people get sick.
+people get sick, and every cross-city connection is drawn green, yellow, or red
+by the health of the two people it joins.
 
 Written by Jeff Saracco in March 2006, during my senior year of college, as
 part of a research project. I didn't finish it that year; the flu spreading
@@ -98,7 +99,7 @@ the page.
 
 - **Hospitals.** Each city is a hospital. As the share of its people who are sick goes up, the hospital grows, its heart beats faster (40 to 180 bpm), its windows burn red, and veins climb its walls, with each beat pulsing up them. As people recover, it all shrinks back. Everything scales with the square root of a city's sick count divided by the run's peak, so a small outbreak still shows.
 - **Globe.** Red veins spread over the ground around each sick city, and the atmosphere turns from blue to red as the world gets sicker.
-- **Arcs.** A red pulse arcs between cities when an infection crosses, and leaves a faint trail behind.
+- **Connections.** Every cross-city edge is its own arc between two hospitals: green when both people are healthy, yellow when one is sick, and red when both are. Several edges between the same two cities fan out side by side. When an infection crosses, a red pulse runs along one of the connections that has a sick person on it.
 - **Controls.** Space plays and pauses, the arrow keys step one day, and you can drag the timeline. Click a hospital or a city in the list to fly in close; Esc or "Whole globe" flies back out.
 - **Links.** `?day=12` opens paused on day 12, `?city=London` opens close up on London, and `?data=path` loads another file.
 
@@ -135,6 +136,8 @@ infect host 512, which city 1 ignores unless the population is bigger than 512.
 4. **Global rewire.** Taking turns, each city rewires its cross-city edges
    with probability `swnP_city` to a random person in a random other city.
 5. **Initial infection.** The flu starts in `seed_city` (city 1 by default).
+   Every city also sends city 1 its cross-city edges for the globe. Each edge is
+   sent once, by the lower-numbered of its two cities.
 6. **Each day,** every city:
    1. vaccinates, if it's a vaccination day
    2. recovers people whose infection has run its course
@@ -143,8 +146,9 @@ infect host 512, which city 1 ignores unless the population is bigger than 512.
    4. waits at a barrier until every city has sent today's infections
    5. tries the infections other cities sent, against each person's immunity,
       in city order
-   6. reports its counts to city 1, which writes that day's line of
-      `epidemic.jsonl`
+   6. reports its counts to city 1, along with which of its people who have
+      cross-city neighbors are sick. City 1 then writes that day's line of
+      `epidemic.jsonl`.
 7. **Output.** Cities take turns appending their network to `network.dat`.
 
 A barrier means: each city sends a barrier message to every other city, then
@@ -166,6 +170,10 @@ The commands cities send each other are plain native-endian `int`s:
 | `-10` | barrier | nothing |
 | `-13` | infect | day, receiver's host, strain H, N, and strain bits |
 | `-14` | day stats (to city 1) | day, infected, recovered, vaccinated, then infections imported from each city |
+| `-15` | cross-city edge (to city 1, once) | sender's host, other city, other city's host |
+| `-16` | sick border hosts (to city 1, daily) | a count, then the day and the sender's hosts with cross-city neighbors who are sick |
+
+Commands with a variable length, like `-16`, send their count first.
 
 ### `epidemic.jsonl` format
 
@@ -173,13 +181,14 @@ One JSON object per line. The first line describes the run, and then there's
 one line per day. Cities are numbered from 0, in `cities.txt` order.
 
 ```
-{"type":"meta","version":1,"days":100,"population":10000,"seedCity":0,"cities":[{"name":"New York","lat":40.71,"lon":-74.01}, ...]}
-{"type":"day","day":0,"infected":[1,0,0,0],"recovered":[0,0,0,0],"vaccinated":[0,0,0,0],"imports":[]}
-{"type":"day","day":3,"infected":[72,1,0,0], ... ,"imports":[[0,1,1]]}
+{"type":"meta","version":1,"days":100,"population":10000,"seedCity":0,"cities":[{"name":"New York","lat":40.71,"lon":-74.01}, ...],"links":[[0,1],[0,3], ...]}
+{"type":"day","day":0,"infected":[1,0,0,0],"recovered":[0,0,0,0],"vaccinated":[0,0,0,0],"imports":[],"linkStates":"00000000000000000000"}
+{"type":"day","day":3,"infected":[72,1,0,0], ... ,"imports":[[0,1,1]],"linkStates":"00010000000000000000"}
 ```
 
-`imports` lists `[from city, to city, count]` for each pair of cities where an
-infection crossed and took that day. City 1 writes each line as soon as the
+- `links` lists the two cities of every cross-city edge.
+- `linkStates` has one digit per link, in the same order: `0` means both people are healthy, `1` means one is sick, and `2` means both are.
+- `imports` lists `[from city, to city, count]` for each pair of cities where an infection crossed and took that day. City 1 writes each line as soon as the
 day finishes, so the file could be streamed to a live viewer.
 
 ### `network.dat` format
