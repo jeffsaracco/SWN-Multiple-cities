@@ -54,6 +54,8 @@ void apply_imported_infections();
 void report_day();
 void write_epidemic_meta();
 int command_arg_count(int code);
+void collect_links();
+void add_link(int city_a, int host_a, int city_b, int host_b);
 void initInfect();
 struct strain_list *new_strain_list();
 struct flu *new_flu_strain();
@@ -167,12 +169,18 @@ int CITY_NUMBER;
    Add/delete: the sender's host, the receiver's host, the sender's city number.
    Infect: day, the receiver's host, and the strain's H, N and strain bits.
    Day stats (to city 1): day, infected, recovered, vaccinated, then the number
-   of infections imported today from each city. */
+   of infections imported today from each city.
+   Link (to city 1, once): the sender's host, the other city, the other host.
+   Border sick (to city 1, daily): a count, then the day and the sender's hosts
+   with cross-city neighbors who are sick that day. */
 #define CMD_DEL_FOREIGN_NEIGHBOR  -6
 #define CMD_ADD_FOREIGN_NEIGHBOR  -9
 #define CMD_BARRIER              -10
 #define CMD_INFECT               -13
 #define CMD_DAY_STATS            -14
+#define CMD_LINK                 -15
+#define CMD_BORDER_SICK          -16
+#define VARIABLE_LENGTH           -1 /* command_arg_count() for commands that send their count first */
 #define DAY_STATS_FIELDS           4 /* day, infected, recovered, vaccinated */
 
 #define MAX_CITIES 64
@@ -205,6 +213,13 @@ struct imported_infection
 };
 struct imported_infection *imported_head[MAX_CITIES], *imported_tail[MAX_CITIES]; /* by source city */
 int city_stats[MAX_CITIES][DAY_STATS_FIELDS + MAX_CITIES];	/* city 1 only: latest day stats from each city */
+/* city 1 only: every cross-city edge, and the last day each end of one was sick */
+struct link
+{
+	int city_a, host_a, city_b, host_b;
+} *links;
+int num_links, links_cap;
+int *border_sick_day[MAX_CITIES];	/* by city, indexed by host */
 
 
 int main(int argc, char **argv)
@@ -430,6 +445,10 @@ int command_arg_count(int code)
 			return 5;
 		case CMD_DAY_STATS:
 			return DAY_STATS_FIELDS + num_Cities;
+		case CMD_LINK:
+			return 3;
+		case CMD_BORDER_SICK:
+			return VARIABLE_LENGTH;
 		default:
 			return 0;
 	}
@@ -441,13 +460,21 @@ void *get_commands(void *arg)
 	int city = (int)(intptr_t) arg;
 	int sock = city_array[city-1];
 	int toReceive, i, n;
-	int args[DAY_STATS_FIELDS + MAX_CITIES];
+	int args_cap = DAY_STATS_FIELDS + MAX_CITIES;
+	int *args = (int *) malloc(sizeof(int) * args_cap);
 	int foreigner, host, host_city;
 	struct imported_infection *inf;
 
 	while (recv_int(sock, &toReceive))
 	{
 		n = command_arg_count(toReceive);
+		if (n == VARIABLE_LENGTH && !recv_int(sock, &n))
+			break;
+		if (n > args_cap)
+		{
+			args_cap = n;
+			args = (int *) realloc(args, sizeof(int) * args_cap);
+		}
 		for (i = 0; i < n; i++)
 			if (!recv_int(sock, &args[i]))
 				break;
@@ -497,6 +524,15 @@ void *get_commands(void *arg)
 				memcpy(city_stats[city-1], args, sizeof(int) * n);
 				break;
 
+			case CMD_LINK:
+				add_link(city, args[0], args[1], args[2]);
+				break;
+
+			case CMD_BORDER_SICK:
+				for (i = 1; i < n; i++)
+					border_sick_day[city-1][args[i]] = args[0];
+				break;
+
 			default:
 				printf("ERROR, Unknown Function %d from city %d\n",toReceive,city);
 				break;
@@ -505,6 +541,7 @@ void *get_commands(void *arg)
 		pthread_mutex_unlock(&net_lock);
 	}
 
+	free(args);
 	close(sock);
 	return NULL;
 }//get_commands
@@ -556,10 +593,11 @@ void runProg(char **argv)
 	mut_rate = mutation_rates[0];
 	//	printf("Population: %d\n",nodes);
 	foreign_array = (int *) malloc(sizeof(int) * nodes); //worst case: every host has a foreign neighbor
-	if (CITY_NUMBER == 1)
-		write_epidemic_meta();
 	initialize(argv);  /* set up model and do statistics */
 	printf("done setting up network and rewiring\n");
+	collect_links();
+	if (CITY_NUMBER == 1)
+		write_epidemic_meta();
 
 	duration = 0;
 	peak_num = 0;
@@ -653,9 +691,14 @@ void apply_imported_infections()
 void report_day()
 {
 	static const char *field_names[DAY_STATS_FIELDS] = { "day", "infected", "recovered", "vaccinated" };
-	int si, city, from, field, waiting, any_imports = 0;
+	int si, city, from, field, waiting, any_imports = 0, n, l;
 	int numinfhosts = 0, numrechosts = 0, numinfections = 0, numvaccinated = 0;
 	int stats[1 + DAY_STATS_FIELDS + MAX_CITIES];
+	static int *sick;
+	struct link *k;
+
+	if (!sick)
+		sick = (int *) malloc(sizeof(int) * (3 + nodes));
 	struct flu *recovereds;
 
 	for (si=0; si < nodes; si++) 
@@ -701,11 +744,23 @@ void report_day()
 	memcpy(&stats[5], imports_today, sizeof(int) * num_Cities);
 	memset(imports_today, 0, sizeof(imports_today));
 
+	/* who's sick at this city's end of each cross-city edge */
+	sick[0] = CMD_BORDER_SICK;
+	sick[2] = day;
+	n = 3;
+	for (si = 0; si < num_for_neigh; si++)
+		if (level[foreign_array[si]/unit].id[foreign_array[si]%unit].flu_strains_infected)
+			sick[n++] = foreign_array[si];
+	sick[1] = n - 2;
+
 	if (CITY_NUMBER != 1)
 	{
+		send_ints(1, sick, n);
 		send_ints(1, stats, 1 + DAY_STATS_FIELDS + num_Cities);
 		return;
 	}
+	for (si = 3; si < n; si++)
+		border_sick_day[0][sick[si]] = day;
 
 	pthread_mutex_lock(&net_lock);
 	memcpy(city_stats[0], &stats[1], sizeof(int) * (DAY_STATS_FIELDS + num_Cities));
@@ -735,7 +790,14 @@ void report_day()
 				fprintf(epidemic_output, "%s[%d,%d,%d]", any_imports ? "," : "", from, city, city_stats[city][DAY_STATS_FIELDS + from]);
 				any_imports = 1;
 			}
-	fprintf(epidemic_output, "]}\n");
+	/* each cross-city edge: 0 = both ends healthy, 1 = one sick, 2 = both sick */
+	fprintf(epidemic_output, "],\"linkStates\":\"");
+	for (l = 0; l < num_links; l++)
+	{
+		k = &links[l];
+		fputc('0' + (border_sick_day[k->city_a-1][k->host_a] == day) + (border_sick_day[k->city_b-1][k->host_b] == day), epidemic_output);
+	}
+	fprintf(epidemic_output, "\"}\n");
 	fflush(epidemic_output);
 	pthread_mutex_unlock(&net_lock);
 }//report_day
@@ -743,7 +805,7 @@ void report_day()
 /* First line of epidemic.jsonl: what the visualization needs to lay out the cities. */
 void write_epidemic_meta()
 {
-	int city;
+	int city, l;
 	char *c;
 
 	if ((epidemic_output = fopen("epidemic.jsonl", "w")) == NULL)
@@ -760,9 +822,69 @@ void write_epidemic_meta()
 	for (city = 0; city < num_Cities; city++)
 		fprintf(epidemic_output, "%s{\"name\":\"%s\",\"lat\":%.4f,\"lon\":%.4f}",
 			city ? "," : "", city_name[city], city_lat[city], city_lon[city]);
+	fprintf(epidemic_output, "],\"links\":[");
+	for (l = 0; l < num_links; l++)
+		fprintf(epidemic_output, "%s[%d,%d]", l ? "," : "", links[l].city_a - 1, links[l].city_b - 1);
 	fprintf(epidemic_output, "]}\n");
 	fflush(epidemic_output);
 }//write_epidemic_meta
+
+void add_link(int city_a, int host_a, int city_b, int host_b)
+{
+	if (num_links == links_cap)
+	{
+		links_cap = links_cap ? links_cap * 2 : 64;
+		links = (struct link *) realloc(links, sizeof(struct link) * links_cap);
+	}
+	links[num_links].city_a = city_a;
+	links[num_links].host_a = host_a;
+	links[num_links].city_b = city_b;
+	links[num_links].host_b = host_b;
+	num_links++;
+}
+
+int compare_links(const void *a, const void *b)
+{
+	const struct link *x = a, *y = b;
+	if (x->city_a != y->city_a) return x->city_a - y->city_a;
+	if (x->host_a != y->host_a) return x->host_a - y->host_a;
+	if (x->city_b != y->city_b) return x->city_b - y->city_b;
+	return x->host_b - y->host_b;
+}
+
+/* City 1 gathers every cross-city edge for the globe.  Each edge is listed by
+   both of its cities, so only the lower-numbered one reports it. */
+void collect_links()
+{
+	int h, k, city;
+	struct neighbor_info *nb;
+
+	pthread_mutex_lock(&net_lock);
+	for (h = 0; h < nodes; h++)
+		for (k = 0; k < level[h/unit].id[h%unit].myNumNeighbors; k++)
+		{
+			nb = &level[h/unit].id[h%unit].neighbor[k];
+			if (nb->city <= CITY_NUMBER)
+				continue;
+			if (CITY_NUMBER == 1)
+				add_link(1, h, nb->city, abs(nb->ID));
+			else
+				send_cmd(1, CMD_LINK, h, nb->city, abs(nb->ID));
+		}
+	pthread_mutex_unlock(&net_lock);
+	barrier(); // every city's links have reached city 1
+
+	if (CITY_NUMBER == 1)
+	{
+		qsort(links, num_links, sizeof(struct link), compare_links); // arrival order varies
+		for (city = 0; city < num_Cities; city++)
+		{
+			border_sick_day[city] = (int *) malloc(sizeof(int) * nodes);
+			for (h = 0; h < nodes; h++)
+				border_sick_day[city][h] = -1;
+		}
+	}
+}//collect_links
 
 void freeNetwork()
 {
