@@ -17,8 +17,8 @@
 int main( int argc, char **argv);
 void runProg(char **argv);
 void freeNetwork();
-void acceptFromOtherCity();
-void connectToCity();
+void *acceptFromOtherCity(void *unused);
+void *connectToCity(void *unused);
 void rewire();
 int isANeighbor(int host, int randHost);
 void delNeighbor(int host, int delHost);
@@ -113,7 +113,7 @@ int unit, nodes;
 struct strain_list *first_strain;
 struct flu *first_flu;
 int neighbors;
-char printinfo, vaccinate;
+int printinfo, vaccinate;
 int day,vacc_day,net_type,num_days,num_runs,numbits_Hsubtypes,numbits_Nsubtypes, num_net_types, strat_comb, pc_comb;
 int half_pop_inf,num_days_vacc, num_vacc_strat, vacc_strats[36], vacc_strat, print_average, tree, count_strains, currentvacc;
 int strategy,percentage,original_number_neighbors,net_types[2], duration, peak_day,countrun = 0;
@@ -132,7 +132,8 @@ FILE *input, *average_flu_days, *host_output, *flu_sum_output, *tree_files, *str
 int CITY_NUMBER;
 
 /* declarations for sockets */
-int sockfd,newsockfd,clilen,childpid, n;
+int sockfd,newsockfd,childpid, n;
+socklen_t clilen;
 struct sockaddr_in cli_addr, serv_addr, serv_addr2;
 char recvline[MAXLINE];
 
@@ -145,13 +146,14 @@ int main(int argc, char **argv)
 
 	char s[120];
 	
-	pthread_t doWork, hear, speak;
+	pthread_t network;
 	
 	if (argc != 3) 
 	{
 		printf ("Try: argv[0] RandNumberSeed CityNumber\n");
 		exit(0);
 	}
+	setvbuf(stdout, NULL, _IOLBF, 0);
 	srand(25 * atoi(argv[1]));
 	
 	CITY_NUMBER = atoi(argv[2]);
@@ -168,19 +170,16 @@ int main(int argc, char **argv)
 		exit(0);
 	}
 	
-	pthread_create(&doWork, NULL, runProg, argv);
-	
 	if(CITY_NUMBER == 1)
-		pthread_create(&hear, NULL, acceptFromOtherCity, NULL);
+		pthread_create(&network, NULL, acceptFromOtherCity, NULL);
 	else if (CITY_NUMBER == 2)
-		pthread_create(&speak, NULL, connectToCity, NULL);
+		pthread_create(&network, NULL, connectToCity, NULL);
 	
-	pthread_join(doWork, NULL);
-	pthread_join(hear,NULL);
-	pthread_join(speak,NULL);
+	runProg(argv); // exits when the run is done
+	return 0;
 }
 
-void acceptFromOtherCity()
+void *acceptFromOtherCity(void *unused)
 {
 	int host,numbytes;
 
@@ -242,7 +241,8 @@ void acceptFromOtherCity()
 
 			while(day < num_days)
 			{
-				recv(newsockfd, &host, sizeof(host), 0);
+				if(recv(newsockfd, &host, sizeof(host), MSG_WAITALL) <= 0)
+					break; // other city hung up; go back to accepting
 				if(host < nodes)
 				printf("received %d host, gonna infect on %d\n",host,day);
 				recv(newsockfd, &firstFlu->H, sizeof(int), 0);
@@ -256,14 +256,16 @@ void acceptFromOtherCity()
 				host = nodes+1;
 					
 			}
+			close(newsockfd);
 		//}
 		
 	}//while 1
 	
 	close(newsockfd);
+	return NULL;
 }//acceptfromothercity
 
-void connectToCity()
+void *connectToCity(void *unused)
 {
 	int hostToInfect = 670, i;
 	
@@ -316,7 +318,7 @@ void connectToCity()
 	}
 	
 	close(sockfd);
-	
+	return NULL;
 }//connectToCity
 
 
@@ -333,7 +335,7 @@ void runProg(char **argv)
 	fprintf(flu_sum_output,"\nNet_type,swnP,vacc_strats,per_vaccs,popsize,NCR,mut_rate,num_inf,tot_inf,duration,peak_inf,peak_day,half_pop_inf_day,# strains\n");
 	if(!vaccinate) {
 		printf("WARNING: Not vaccinating but summary output will report vacc_strat!\n");
-		printf("\tAlthough slower, consider vaccinating but setting proportion \n\tof pop to vacc = 0.0%\n\n");
+		printf("\tAlthough slower, consider vaccinating but setting proportion \n\tof pop to vacc = 0.0%%\n\n");
 	}
 	
 	swnP = p_values[0];
@@ -967,7 +969,7 @@ void readvars()
 	//	printf("numbits_Hsubtypes:%d\n",numbits_Hsubtypes);
 	fscanf(input, "%d %*s", &numbits_Nsubtypes);
 	//	printf("numbits_Nsubtypes:%d\n",numbits_Nsubtypes);
-	fscanf(input, "%d %*s", &numbits_strain);
+	fscanf(input, "%ld %*s", &numbits_strain);
 	//	printf("numbits_strain:%d\n",numbits_strain);
 		if (numbits_Hsubtypes > 32 || numbits_Nsubtypes > 32 || numbits_strain > 32) 
 		{
@@ -1076,7 +1078,7 @@ void readvars()
 	fprintf(flu_sum_output,"\n");
 	fprintf(flu_sum_output,"numbits_Hsubtypes = %d\n", numbits_Hsubtypes);
   	fprintf(flu_sum_output,"numbits_Nsubtypes = %d\n", numbits_Nsubtypes);
-	fprintf(flu_sum_output,"numbits_strain = %d\n", numbits_strain);
+	fprintf(flu_sum_output,"numbits_strain = %ld\n", numbits_strain);
   	fprintf(flu_sum_output,"latent_period = %d\n", latent_period);
 	fprintf(flu_sum_output,"num_days_infectious = %d\n", num_days_infectious);
 	fprintf(flu_sum_output,"num strains in vaccine = %d\n",num_flu_vaccine);
@@ -2086,7 +2088,7 @@ void make_tree_file(char *argv[])
 	strcat(tree_file,s);
 	strcat(tree_file,".csv");
 	if ((tree_files = fopen(tree_file, "w")) == NULL) {
-		printf("failed to open average_flu_day (%s) output file\n",tree_files);
+		printf("failed to open average_flu_day (%s) output file\n",tree_file);
 		exit(0);
 	}
 	fprintf(tree_files,"newbit,oldbit,Strain,Oldstrain,hamdist,1st day,tot day,last day\n");
@@ -2109,7 +2111,7 @@ void make_strains_file(char *argv[])
 	strcat(strain_file,".csv");
 	if ((strain_files = fopen(strain_file, "w")) == NULL) 
 	{
-		printf("failed to open average_flu_day (%s) output file\n",strain_files);
+		printf("failed to open average_flu_day (%s) output file\n",strain_file);
 			exit(0);
 	}
 	fprintf(strain_files,"day,# strains,total #\n");

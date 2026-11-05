@@ -17,6 +17,7 @@ A Distributed Multiple City Simulation of Small-World Networks
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <stdint.h>
 #include "inet.h"
 
 
@@ -27,9 +28,16 @@ A Distributed Multiple City Simulation of Small-World Networks
 int main( int argc, char **argv);
 void runProg(char **argv);
 void freeNetwork();
-void listen_for_connects(int i);
-void connect_cities(int i);
-void get_commands(int i);
+void read_cities(const char *path);
+int connect_to_city(int city);
+void connect_cities();
+void send_ints(int city, const int *values, int n);
+void send_code(int city, int code);
+void send_cmd(int city, int code, int host, int foreigner, int host_city);
+int recv_int(int sock, int *value);
+void *get_commands(void *arg);
+void barrier();
+void wait_for_rewire_token();
 void rewire();
 int isANeighbor(int host, int randHost);
 void delNeighbor(int host, int delHost);
@@ -96,7 +104,7 @@ int unit, nodes;
 struct strain_list *first_strain;
 struct flu *first_flu;
 int neighbors;
-char printinfo, vaccinate;
+int printinfo, vaccinate;
 int day,vacc_day,net_type,num_days,num_runs,numbits_Hsubtypes,numbits_Nsubtypes, num_net_types, strat_comb, pc_comb;
 int half_pop_inf,num_days_vacc, num_vacc_strat, vacc_strats[36], vacc_strat, print_average, tree, count_strains, currentvacc;
 int strategy,percentage,original_number_neighbors,net_types[2], duration, peak_day,countrun = 0;
@@ -113,336 +121,314 @@ float totalinfections[10000],averageinfections[10000];
 FILE *input, *average_flu_days, *host_output, *flu_sum_output, *tree_files, *strain_files;
 
 int CITY_NUMBER;
-int GO_AHEAD = 0, go2 = 0;
+
+/* Commands sent between cities.  Add/delete are followed by three ints:
+   the sender's host, the receiver's host, and the sender's city number. */
+#define CMD_DEL_FOREIGN_NEIGHBOR  -6
+#define CMD_ADD_FOREIGN_NEIGHBOR  -9
+#define CMD_BARRIER              -10
+#define CMD_REWIRE_TOKEN         -12
+
+#define MAX_CITIES 64
 
 /* declarations for sockets */
-int *city_array;
-int num_Cities = 4;
-int this_city;
-int SERV_TCP_PORT = 5529;
-int num_connected = 0;
+int num_Cities;
+char city_host[MAX_CITIES][256];	/* address of each city, indexed by city-1 */
+int city_port[MAX_CITIES];
+int city_array[MAX_CITIES];			/* socket to each other city, indexed by city-1 */
 int n_cross_city_edges = 10;
 int num_for_neigh;
 int *foreign_array;
 float swnP_city = 0.5;
 
-struct timeval tv;
-fd_set readfds;
+/* net_lock guards the network and the fields below, which the get_commands
+   threads update as commands arrive from other cities. */
+pthread_mutex_t net_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t net_cond = PTHREAD_COND_INITIALIZER;
+int barriers_from[MAX_CITIES];		/* barriers received from each city */
+int barriers_sent = 0;
+int have_rewire_token = 0;
 
 
 int main(int argc, char **argv)
 {
-
 	char s[120];
 	int i;
-	pthread_t doWork, connects[num_Cities], listens[num_Cities], commands[num_Cities];
-	
-	if (argc != 3) 
+	pthread_t commands[MAX_CITIES];
+
+	if (argc != 3 && argc != 4)
 	{
-		printf ("Try: %s RandNumberSeed CityNumber\n",argv[0]);
+		printf ("Try: %s RandNumberSeed CityNumber [CitiesFile]\n",argv[0]);
 		exit(0);
 	}
+	setvbuf(stdout, NULL, _IOLBF, 0);
 	srand(25 * atoi(argv[1]));
-	
+
 	CITY_NUMBER = atoi(argv[2]);
-	
+	read_cities(argc == 4 ? argv[3] : "cities.txt");
+	if (CITY_NUMBER < 1 || CITY_NUMBER > num_Cities)
+	{
+		printf("CityNumber must be between 1 and %d\n", num_Cities);
+		exit(1);
+	}
+
 	//srand((unsigned)time(NULL));
 	strcpy(s,"sum_file");
 	strcat(s,argv[1]);
 	strcat(s," city ");
 	strcat(s,argv[2]);
 	strcat(s,".csv");
-	if ((flu_sum_output = fopen(s, "w")) == NULL) 
+	if ((flu_sum_output = fopen(s, "w")) == NULL)
 	{
 		printf("failed to open flu summary output file: be sure it's closed in Excel\n");
 		exit(0);
 	}
-	
-	pthread_create(&doWork, NULL, (void *) runProg, (void *) &argv);
-	
-	for(i = CITY_NUMBER; i <= num_Cities; i++) //create listening threads
-	{
-		if( i != CITY_NUMBER )
-			pthread_create(&listens[i-1], NULL, (void *) listen_for_connects, i);
-	}
-	sleep(5);
-	SERV_TCP_PORT = 5529;
-	for(i = CITY_NUMBER-1; i > 0; i--) //create talking threads
-	{
-		if( i != CITY_NUMBER )
-			pthread_create(&connects[i-1], NULL, (void *) connect_cities, i);
-	}
-	
-	while(num_connected < num_Cities-1)
-	{}
-		
+
+	connect_cities();
+
 	for(i = 1; i <= num_Cities; i++) //create commands listening threads
 	{
 		if( i != CITY_NUMBER )
-			pthread_create(&commands[i-1], NULL, (void *) get_commands, i);	
+			pthread_create(&commands[i-1], NULL, get_commands, (void *)(intptr_t) i);
 	}
-	
-	for(i = 1; i <= num_Cities; i++) //clean up listening threads
-	{
-		if( i != CITY_NUMBER )
-			pthread_join(listens[i-1],NULL);
-	}
-	
-	for(i = 1; i <= num_Cities; i++) //clean up talking threads
-	{
-		if( i != CITY_NUMBER )
-			pthread_join(connects[i-1],NULL);
-	}
-	
-	pthread_join(doWork,NULL);
-	
+
+	runProg(argv); // exits when the run is done
+	return 0;
 }
 
-void listen_for_connects(int i)//listen_for_connects
+/* Reads one "host port" line per city; line N is city N. */
+void read_cities(const char *path)
 {
-	int host,numbytes;
-	int city = i;
-	int city_sock;
-	int clilen,childpid, n;
-	struct sockaddr_in cli_addr, serv_addr, serv_addr2;
-	char recvline[MAXLINE];
+	FILE *f;
+	char line[512];
 
-	tv.tv_sec = 2;
-	tv.tv_usec = 500000;
-	
-	struct flu *firstFlu = (struct flu *) malloc(sizeof(struct flu));
-	struct flu *f = (struct flu *) malloc(sizeof(struct flu));
-	
-	FD_ZERO(&readfds);
-	
-	/*
-    * open a TCP socket - Internet stream socket
-    */
-   if ( (this_city = socket(AF_INET, SOCK_STREAM,0)) < 0 ) 
-   {
-      perror("server: can't open stream socket");
-      exit(1);
-   }
-   
-   
-	/*
-    * bind our local address so that the client can send us
-    */
+	if ((f = fopen(path, "r")) == NULL)
+	{
+		perror(path);
+		exit(1);
+	}
+	num_Cities = 0;
+	while (fgets(line, sizeof(line), f))
+	{
+		if (line[0] == '#' || line[0] == '\n')
+			continue;
+		if (num_Cities == MAX_CITIES)
+		{
+			printf("too many cities in %s (max %d)\n", path, MAX_CITIES);
+			exit(1);
+		}
+		if (sscanf(line, "%255s %d", city_host[num_Cities], &city_port[num_Cities]) != 2)
+		{
+			printf("bad line in %s: %s", path, line);
+			exit(1);
+		}
+		num_Cities++;
+	}
+	fclose(f);
+	if (num_Cities < 2)
+	{
+		printf("%s must list at least 2 cities\n", path);
+		exit(1);
+	}
+}//read_cities
+
+/* Opens a TCP connection to a city, retrying while it starts up. */
+int connect_to_city(int city)
+{
+	struct addrinfo hints, *addr;
+	char port[16];
+	int sock, attempt;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	snprintf(port, sizeof(port), "%d", city_port[city-1]);
+
+	printf("Trying to connect to city %d...\n",city);
+	for (attempt = 0; attempt < 60; attempt++, sleep(1))
+	{
+		if (getaddrinfo(city_host[city-1], port, &hints, &addr) != 0)
+			continue; // name not resolvable yet (e.g. container still starting)
+		sock = socket(AF_INET, SOCK_STREAM, 0);
+		if (sock < 0)
+		{
+			perror("client: can't open stream socket");
+			exit(1);
+		}
+		if (connect(sock, addr->ai_addr, addr->ai_addrlen) == 0)
+		{
+			freeaddrinfo(addr);
+			return sock;
+		}
+		close(sock);
+		freeaddrinfo(addr);
+	}
+	printf("client: can't connect to city %d at %s:%s\n", city, city_host[city-1], port);
+	exit(2);
+}//connect_to_city
+
+/* Connects every pair of cities once: each city dials the lower-numbered
+   cities and accepts connections from the higher-numbered ones.  The dialing
+   city sends its number first so the acceptor knows who it is. */
+void connect_cities()
+{
+	struct sockaddr_in serv_addr;
+	int listener, sock, city, i, on = 1;
+
+	if ( (listener = socket(AF_INET, SOCK_STREAM,0)) < 0 )
+	{
+		perror("server: can't open stream socket");
+		exit(1);
+	}
+	setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 	memset((char *) &serv_addr, 0, sizeof(serv_addr));
 	serv_addr.sin_family = AF_INET;
 	serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	serv_addr.sin_port = htons(SERV_TCP_PORT++);
-
-	if ( bind(this_city, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) 
+	serv_addr.sin_port = htons(city_port[CITY_NUMBER-1]);
+	if ( bind(listener, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
 	{
 		perror("server: can't bind local address");
 		exit(1);
 	}
+	listen(listener, MAX_CITIES);
 
-	printf("waiting for City %d to connect.....\n", i);
-	listen(this_city, 15);
-  while(1) 
-   {
-		/*
-		* wait for a connection from a client process
-		* - concurrent server -
-		*/
-		clilen = sizeof(cli_addr);
-		city_sock = accept(this_city, (struct sockaddr *) &cli_addr, &clilen); 
-      
-		if (city_sock < 0 ) 
+	for (city = 1; city < CITY_NUMBER; city++)
+	{
+		city_array[city-1] = connect_to_city(city);
+		send_ints(city, &CITY_NUMBER, 1);
+		printf("CONNECTED to city %d\n",city);
+	}
+
+	for (i = CITY_NUMBER + 1; i <= num_Cities; i++)
+	{
+		printf("waiting for a city to connect.....\n");
+		sock = accept(listener, NULL, NULL);
+		if (sock < 0 )
 		{
-			if (errno == EINTR)
-				continue; /*try again*/
 			perror("server: accept error");
 			exit(1);
 		}
-	
-		city_array[city-1] = city_sock;
-		FD_SET(city_array[city-1], &readfds);
-
-		
+		if (!recv_int(sock, &city) || city <= CITY_NUMBER || city > num_Cities)
+		{
+			printf("server: bad hello from a connecting city\n");
+			exit(1);
+		}
+		city_array[city-1] = sock;
 		printf("city %d connected\n",city);
-		num_connected++;
-		
-	}//while 1
-	
-}//listen_for_connects
-
-
-void connect_cities(int city)
-{
-	int i = 1, toReceive;
-	
-	int clilen,childpid, n;
-	struct sockaddr_in cli_addr, serv_addr, serv_addr2;
-	char recvline[MAXLINE];
-	
-	struct flu *f = first_flu;
-
-	memset( (char *) &serv_addr, 0, sizeof(serv_addr));
-	serv_addr.sin_family = AF_INET;
-	
-	printf("Trying to connect to city %d...\n",city);
-	
-	switch(city)
-	{
-		case 1:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_1);
-		break;
-		
-		case 2:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_2);
-		break;
-		
-		case 3:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_3);
-		break;
-		
-		case 4:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_4);
-		break;
-		
-		case 5:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_5);
-		break;
-		
-		case 6:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_6);
-		break;
-		
-		case 7:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_7);
-		break;
-		
-		case 8:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_8);
-		break;
-		
-		case 9:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_9);
-		break;
-		
-		case 10:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_10);
-		break;
-		
-		case 11:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_11);
-		break;
-		
-		case 12:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_12);
-		break;
-		
-		case 13:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_13);
-		break;
-		
-		case 14:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_14);
-		break;
-		
-		case 15:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_15);
-		break;
-		
-		case 16:
-			serv_addr.sin_addr.s_addr = inet_addr(CITY_16);
-		break;
-		
-		default:
-		break;
-	}//switch
-	
-	serv_addr.sin_port = htons(SERV_TCP_PORT++);
-	
-	/*
-	* open a TCP socket - internet stream socket
-	*/
-   
-	if ( (city_array[city-1] = socket(AF_INET, SOCK_STREAM,0)) < 0 ) 
-	{
-		perror("client: can't open stream socket");
-		exit(1);
 	}
-		
-	/*
-	* connect to the server
-	*/
-
-	if (connect(city_array[city-1], (struct sockaddr *) &serv_addr, sizeof(serv_addr) ) < 0) 
-	{	
-		perror("client: can't connect to server");
-		exit(2);
-	}
-
-	printf("CONNECTED to city %d\n",city);
-	num_connected++;
-
+	close(listener);
 }//connect_cities
 
-void get_commands(int i)
+void send_ints(int city, const int *values, int n)
 {
-	int city = i;
-	int toReceive, temp;
-	int foreigner, host, host_city;
-	
-	while( day < num_days )
+	if (send(city_array[city-1], values, n * sizeof(int), 0) != n * (int) sizeof(int))
 	{
-		if(recv(city_array[city-1], &toReceive, sizeof(int), 0) < 0)
-			break;
-		
-	//	recv(city_array[city-1], &toReceive, sizeof(int), 0);
-		
+		perror("SEND ERROR");
+		exit(1);
+	}
+}
+
+void send_code(int city, int code)
+{
+	send_ints(city, &code, 1);
+}
+
+void send_cmd(int city, int code, int host, int foreigner, int host_city)
+{
+	int msg[4] = { code, host, foreigner, host_city };
+	send_ints(city, msg, 4);
+}
+
+int recv_int(int sock, int *value)
+{
+	return recv(sock, value, sizeof(int), MSG_WAITALL) == sizeof(int);
+}
+
+/* One thread per other city: applies the commands that city sends us. */
+void *get_commands(void *arg)
+{
+	int city = (int)(intptr_t) arg;
+	int sock = city_array[city-1];
+	int toReceive;
+	int foreigner, host, host_city;
+
+	while (recv_int(sock, &toReceive))
+	{
+		if (toReceive == CMD_ADD_FOREIGN_NEIGHBOR || toReceive == CMD_DEL_FOREIGN_NEIGHBOR)
+		{
+			if (!recv_int(sock, &foreigner) || !recv_int(sock, &host) || !recv_int(sock, &host_city))
+				break;
+		}
+
+		pthread_mutex_lock(&net_lock);
 		switch(toReceive)
 		{
-			case -12:
-				go2 = 1;
+			case CMD_REWIRE_TOKEN:
+				have_rewire_token = 1;
 				break;
-		
-			case -11:
+
+			case CMD_BARRIER:
+				barriers_from[city-1]++;
 				break;
-				
-			case -10:
-				GO_AHEAD = 1;
-				break;
-			
-			case -9:// global rewiring code
-				recv(city_array[city-1], &foreigner, sizeof(host), 0);
-				recv(city_array[city-1], &host, sizeof(host), 0);
-				recv(city_array[city-1], &host_city, sizeof(host), 0);
+
+			case CMD_ADD_FOREIGN_NEIGHBOR:// global rewiring code
 				printf("received host: %d to connect to %d from city %d\n",host,foreigner,host_city);
 				level[host/unit].id[host%unit].neighbor[level[host/unit].id[host%unit].myNumNeighbors].ID = foreigner;
 				level[host/unit].id[host%unit].neighbor[level[host/unit].id[host%unit].myNumNeighbors++].city = host_city;
 				level[host/unit].id[host%unit].myNumForNeigh++;
 				if(level[host/unit].id[host%unit].myNumForNeigh == 1)
 					foreign_array[num_for_neigh++] = host;
-				num_connected++;
-				toReceive = -11;
 				break;
-			
-			case -6:
-				recv(city_array[city-1], &foreigner, sizeof(host), 0);
-				recv(city_array[city-1], &host, sizeof(host), 0);
-				recv(city_array[city-1], &host_city, sizeof(host), 0);
+
+			case CMD_DEL_FOREIGN_NEIGHBOR:
 		//		printf("received deletion of host %d's neighbor %d, from city %d\n",host, foreigner, city);
 				delForNeigh(host, foreigner, city);
-				toReceive = -11;				
 				break;
-				
-			default:
-		//		printf("ERROR, Unknown Function %d from city %d\n",toReceive,city);
-				toReceive = -11;
-				break;		
-		}
-		
-		temp=toReceive;
-	}
-	
-	close(city_array[city-1]);
 
+			default:
+				printf("ERROR, Unknown Function %d from city %d\n",toReceive,city);
+				break;
+		}
+		pthread_cond_broadcast(&net_cond);
+		pthread_mutex_unlock(&net_lock);
+	}
+
+	close(sock);
+	return NULL;
 }//get_commands
+
+/* Blocks until every city has reached this barrier.  Each connection's
+   commands are applied in order, so once a city's barrier has arrived,
+   everything it sent before the barrier has been applied here too. */
+void barrier()
+{
+	int city, waiting;
+
+	barriers_sent++;
+	for (city = 1; city <= num_Cities; city++)
+		if (city != CITY_NUMBER)
+			send_code(city, CMD_BARRIER);
+
+	pthread_mutex_lock(&net_lock);
+	do
+	{
+		waiting = 0;
+		for (city = 1; city <= num_Cities; city++)
+			if (city != CITY_NUMBER && barriers_from[city-1] < barriers_sent)
+				waiting = 1;
+		if (waiting)
+			pthread_cond_wait(&net_cond, &net_lock);
+	} while (waiting);
+	pthread_mutex_unlock(&net_lock);
+}//barrier
+
+void wait_for_rewire_token()
+{
+	pthread_mutex_lock(&net_lock);
+	while (!have_rewire_token)
+		pthread_cond_wait(&net_cond, &net_lock);
+	pthread_mutex_unlock(&net_lock);
+}
 
 void runProg(char **argv)
 {
@@ -454,19 +440,16 @@ void runProg(char **argv)
 	int toSend = 512;
 	
 	readvars();
-	city_array = (int *) malloc(sizeof(int) * num_Cities);
-	foreign_array = (int *) malloc(sizeof(int) * n_cross_city_edges * num_Cities); //worst case scenario
 	fprintf(flu_sum_output,"\nNet_type,swnP,vacc_strats,per_vaccs,popsize,NCR,mut_rate,num_inf,tot_inf,duration,peak_inf,peak_day,half_pop_inf_day,# strains\n");
 	if(!vaccinate) {
 		printf("WARNING: Not vaccinating but summary output will report vacc_strat!\n");
-		printf("\tAlthough slower, consider vaccinating but setting proportion \n\tof pop to vacc = 0.0%\n\n");
+		printf("\tAlthough slower, consider vaccinating but setting proportion \n\tof pop to vacc = 0.0%%\n\n");
 	}
 	
 	swnP = p_values[0];
 	nodes = pop_sizes[0];
 	//	printf("Population: %d\n",nodes);
-	while(num_connected < num_Cities-1)
-	{}
+	foreign_array = (int *) malloc(sizeof(int) * nodes); //worst case: every host has a foreign neighbor
 	initialize(argv);  /* set up model and do statistics */
 	printf("done setting up network and rewiring\n");
 	printf("NORMAL EXECUTION\n");
@@ -511,7 +494,6 @@ void initialize(char **argv)// initialize the network
 	int i, j, k;
 	int additional = 1;
 	neighbors = original_number_neighbors;
-	int totForNeigh = 0, indFN = 0;
 	
 	unit = nodes / 10;				// unit size set to tenth of total nodes
 	
@@ -571,79 +553,28 @@ void initialize(char **argv)// initialize the network
 		}
 
 	}
-	sleep(1);
 	rewire();
-	GO_AHEAD = -10;
-	if(CITY_NUMBER == num_Cities)
-		send(city_array[0],&GO_AHEAD,sizeof(int),0);	
+	barrier(); // every city finishes local rewiring before foreign edges arrive
 
-	while(GO_AHEAD != 1)
-	{}
-
-	if(CITY_NUMBER == 1)
-	{	
-		GO_AHEAD = -10;
-		for(i = 1; i <= 3; i++)
-			send(city_array[i],&GO_AHEAD,sizeof(int),0);
-		printf("SENT GO AHEADS TO ALL CITIES\n");
-	}
-	
-	num_connected = 0;
 	if(CITY_NUMBER%2 != 0)
 		global_init();
 	printf("OUT OF GLOBAL INIT\n\n\n");
-	
-	GO_AHEAD = -10;
-	if(CITY_NUMBER == num_Cities)
-		send(city_array[0],&GO_AHEAD,sizeof(int),0);	
-
-	while(GO_AHEAD != 1)
-	{}
+	barrier();
 	printf("ALL CITIES GLOBALLY INIT'D\n");
-	if(CITY_NUMBER == 1)
-	{	
-		GO_AHEAD = -10;
-		for(i = 1; i <= 3; i++)
-			send(city_array[i],&GO_AHEAD,sizeof(int),0);
-		printf("SENT GO AHEADS TO ALL CITIES\n");
-	}
-	
-	
-	if(CITY_NUMBER == 1)
-		go2 = 1;
-	while(go2 != 1)
-	{}
-		
-	global_rewire();	
-	printf("OUT OF GLOBAL REWIRE\n\n\n");
-	go2 = -12;
-	if(CITY_NUMBER != num_Cities)
-		send(city_array[CITY_NUMBER], &go2, sizeof(int),0);
-	
-	GO_AHEAD = -10;
-	if(CITY_NUMBER == num_Cities)
-		send(city_array[0],&GO_AHEAD,sizeof(int),0);
 
-	/*if(CITY_NUMBER = num_Cities - 1)
-	{	
-		sleep(1);
-		send(city_array[CITY_NUMBER],&GO_AHEAD,sizeof(int),0);
-	}*/
-	
-	while(GO_AHEAD != 1)
-	{}
+	/* cities rewire their foreign edges one at a time, passing a token 1 -> 2 -> ... -> N */
+	if(CITY_NUMBER != 1)
+		wait_for_rewire_token();
+	global_rewire();
+	printf("OUT OF GLOBAL REWIRE\n\n\n");
+	if(CITY_NUMBER != num_Cities)
+		send_code(CITY_NUMBER + 1, CMD_REWIRE_TOKEN);
+	barrier();
 	printf("ALL CITIES GLOBALLY REWIRED\n");
-	if(CITY_NUMBER == 1)
-	{	
-		GO_AHEAD = -10;
-		for(i = 1; i <= 3; i++)
-			send(city_array[i],&GO_AHEAD,sizeof(int),0);
-		printf("SENT GO AHEADS TO ALL CITIES\n");
-	}
 
 //	print_people();
-	
-	printf("CITY %d has %d foreign neighbors %d\n",CITY_NUMBER,totForNeigh,indFN);
+
+	printf("CITY %d has %d hosts with foreign neighbors\n",CITY_NUMBER,num_for_neigh);
 	//sleep(10);
 }//initialize
 
@@ -686,9 +617,9 @@ void global_init()
 	int foreigner;
 	int host_city;
 	int foreign_city;
-	int code = -9;
 	int num_crosstown_neighbors = n_cross_city_edges/2;
 	
+	pthread_mutex_lock(&net_lock);
 	for(k = 1; k <= num_Cities; k++)
 	{
 	
@@ -704,10 +635,7 @@ void global_init()
 					
 			for(i = 0; i < num_crosstown_neighbors; i++)
 			{
-				send(city_array[foreign_city],&code,sizeof(int),0);
-				send(city_array[foreign_city], &host, sizeof(int), 0);
-				send(city_array[foreign_city], &foreigner, sizeof(int), 0);
-				send(city_array[foreign_city], &host_city, sizeof(int), 0);
+				send_cmd(foreign_city+1, CMD_ADD_FOREIGN_NEIGHBOR, host, foreigner, host_city);
 		//		printf("sent host: %d to connect to %d from city %d\n",host,foreigner,foreign_city+1);
 				level[host/unit].id[host%unit].neighbor[level[host/unit].id[host%unit].myNumNeighbors].ID = foreigner;
 				level[host/unit].id[host%unit].neighbor[level[host/unit].id[host%unit].myNumNeighbors++].city = foreign_city+1;
@@ -726,10 +654,7 @@ void global_init()
 		
 			for(i = 0; i < num_crosstown_neighbors; i++)
 			{
-				send(city_array[foreign_city],&code,sizeof(int),0);
-				send(city_array[foreign_city], &host, sizeof(int), 0);
-				send(city_array[foreign_city], &foreigner, sizeof(int), 0);
-				send(city_array[foreign_city], &host_city, sizeof(int), 0);
+				send_cmd(foreign_city+1, CMD_ADD_FOREIGN_NEIGHBOR, host, foreigner, host_city);
 		//		printf("sent host: %d to connect to %d from city %d\n",host,foreigner,foreign_city+1);
 				level[host/unit].id[host%unit].neighbor[level[host/unit].id[host%unit].myNumNeighbors].ID = foreigner;
 				level[host/unit].id[host%unit].neighbor[level[host/unit].id[host%unit].myNumNeighbors++].city = foreign_city+1;
@@ -742,12 +667,7 @@ void global_init()
 		}
 		
 	}
-	
-	/*GO_AHEAD = -10;
-	if(CITY_NUMBER != num_Cities)
-		send(city_array[CITY_NUMBER],&GO_AHEAD,sizeof(int),0);
-	else
-		send(city_array[0],&GO_AHEAD,sizeof(int),0);*/
+	pthread_mutex_unlock(&net_lock);
 }//global_init
 
 void global_rewire()
@@ -756,9 +676,8 @@ void global_rewire()
 	float randnumb;
 	int randHost;
 	int randCity;
-	int code = -6;
-	int foreign_city;
 
+	pthread_mutex_lock(&net_lock);
 	for(j = 0; j < num_for_neigh; j++)
 	{
 		host = foreign_array[j];
@@ -777,32 +696,23 @@ void global_rewire()
 					randCity = num_Cities*(rand()/(float)RAND_MAX);
 					randCity++;
 				}
-				while(isAForNeigh(j,randHost,randCity))			//if it is us or one of our neighbors....
+				while(isAForNeigh(host,randHost,randCity))			//if it is us or one of our neighbors....
 					randHost = nodes*(rand()/(float)RAND_MAX);			//	then get get a different random host
 				printf("it will be rewired to %d in city %d\n",randHost,randCity);
 				//delForNeigh(host,level[j/unit].id[j%unit].neighbor[k].ID,level[j/unit].id[j%unit].neighbor[k].city);	//delete the host from the original neighbors array
 				
-				code = -6;
-				foreign_city = level[host/unit].id[host%unit].neighbor[k].city-1;
-				
-				send(city_array[foreign_city],&code,sizeof(int),0);
-				send(city_array[foreign_city], &host, sizeof(int), 0);
-				send(city_array[foreign_city], &level[host/unit].id[host%unit].neighbor[k].ID, sizeof(int), 0);
-				send(city_array[foreign_city], &CITY_NUMBER, sizeof(int), 0);
+				send_cmd(level[host/unit].id[host%unit].neighbor[k].city, CMD_DEL_FOREIGN_NEIGHBOR,
+					host, level[host/unit].id[host%unit].neighbor[k].ID, CITY_NUMBER);
 				
 				level[host/unit].id[host%unit].neighbor[k].ID=0-randHost;		//set the neighbor to the negative value of the random host, negative so that we know it has been rewired already
 				level[host/unit].id[host%unit].neighbor[k].city = randCity;
 				//add the host to the end of the neighbor hosts array
-				code = -9;
-				foreign_city = randCity-1;
-				send(city_array[foreign_city],&code,sizeof(int),0);
-				send(city_array[foreign_city], &host, sizeof(int), 0);
-				send(city_array[foreign_city], &randHost, sizeof(int), 0);
-				send(city_array[foreign_city], &CITY_NUMBER, sizeof(int), 0);
+				send_cmd(randCity, CMD_ADD_FOREIGN_NEIGHBOR, host, randHost, CITY_NUMBER);
 			}
 			
 		}
 	}
+	pthread_mutex_unlock(&net_lock);
 }//global_rewire
 
 int isAForNeigh(int host, int foreigner, int city)
@@ -833,22 +743,23 @@ void delForNeigh(int host, int foreigner, int city)
 		}
 	}
 	
+	if(found == 0)
+	{
+		printf("\n\n\n\n\n%d's NEIGHBOR %d from city %d NOT FOUND!!\n\n\n\n\n\n\n",host,foreigner,city);
+		return;
+	}
 		
 	level[host/unit].id[host%unit].myNumNeighbors--;
 	level[host/unit].id[host%unit].myNumForNeigh--;
 	
 	if(level[host/unit].id[host%unit].myNumForNeigh == 0)
 	{
-		for(k = 0; k < num_for_neigh-1; k++)
-		{
+		for(k = 0; foreign_array[k] != host; k++)
+			;
+		for(; k < num_for_neigh-1; k++)
 			foreign_array[k] = foreign_array[k+1];
-		}
 		num_for_neigh--;
 	}
-	
-	if(found == 0)
-		printf("\n\n\n\n\n%d's NEIGHBOR %d from city %d NOT FOUND!!\n\n\n\n\n\n\n",host,foreigner,city);
-	
 }//dellForNeigh
 
 int isANeighbor(int host, int randHost)
@@ -1045,7 +956,7 @@ void readvars()
 	//	printf("numbits_Hsubtypes:%d\n",numbits_Hsubtypes);
 	fscanf(input, "%d %*s", &numbits_Nsubtypes);
 	//	printf("numbits_Nsubtypes:%d\n",numbits_Nsubtypes);
-	fscanf(input, "%d %*s", &numbits_strain);
+	fscanf(input, "%ld %*s", &numbits_strain);
 	//	printf("numbits_strain:%d\n",numbits_strain);
 		if (numbits_Hsubtypes > 32 || numbits_Nsubtypes > 32 || numbits_strain > 32) 
 		{
@@ -1154,7 +1065,7 @@ void readvars()
 	fprintf(flu_sum_output,"\n");
 	fprintf(flu_sum_output,"numbits_Hsubtypes = %d\n", numbits_Hsubtypes);
   	fprintf(flu_sum_output,"numbits_Nsubtypes = %d\n", numbits_Nsubtypes);
-	fprintf(flu_sum_output,"numbits_strain = %d\n", numbits_strain);
+	fprintf(flu_sum_output,"numbits_strain = %ld\n", numbits_strain);
   	fprintf(flu_sum_output,"latent_period = %d\n", latent_period);
 	fprintf(flu_sum_output,"num_days_infectious = %d\n", num_days_infectious);
 	fprintf(flu_sum_output,"num strains in vaccine = %d\n",num_flu_vaccine);
@@ -1180,50 +1091,33 @@ void readvars()
 void makeGraphicFile()
 {
 	FILE *network;
-	int q, r, i;
-	GO_AHEAD = -10;
-	int code = -10;
-	
-	if(CITY_NUMBER == 1)
+	int q, r, city;
+
+	/* cities take turns appending their part of the network to the shared file */
+	for(city = 1; city <= num_Cities; city++)
 	{
-		network = fopen("network.dat","w");
-		fprintf(network,"%d\n",num_Cities);
-		fclose(network);
-	}
-	else
-	{
-		while(GO_AHEAD != 1)
-		{}
-	}
-	
-	network = fopen("network.dat","a");
-	fprintf(network,"%d\n",nodes);
-	for(q = 0; q < nodes; q++)
-	{
-		fprintf(network, "%d\t",level[q/unit].id[q%unit].myNumNeighbors);
-		for(r = 0; r < level[q/unit].id[q%unit].myNumNeighbors; r++)
+		if(city == CITY_NUMBER)
 		{
-			fprintf(network, "%d\t%d\t",abs(level[q/unit].id[q%unit].neighbor[r].ID),level[q/unit].id[q%unit].neighbor[r].city-1);
+			if ((network = fopen("network.dat", city == 1 ? "w" : "a")) == NULL)
+			{
+				perror("network.dat");
+				exit(1);
+			}
+			if(city == 1)
+				fprintf(network,"%d\n",num_Cities);
+			fprintf(network,"%d\n",nodes);
+			for(q = 0; q < nodes; q++)
+			{
+				fprintf(network, "%d\t",level[q/unit].id[q%unit].myNumNeighbors);
+				for(r = 0; r < level[q/unit].id[q%unit].myNumNeighbors; r++)
+				{
+					fprintf(network, "%d\t%d\t",abs(level[q/unit].id[q%unit].neighbor[r].ID),level[q/unit].id[q%unit].neighbor[r].city-1);
+				}
+				fprintf(network, "\n");
+			}
+			fclose(network);
 		}
-		fprintf(network, "\n");
-	}
-	fclose(network);
-	GO_AHEAD = -10;
-	
-	if(CITY_NUMBER == num_Cities)
-		send(city_array[0],&code,sizeof(int),0);
-	else
-		send(city_array[CITY_NUMBER],&code,sizeof(int),0);
-	
-	while(GO_AHEAD != 1)
-	{}
-	
-	if(CITY_NUMBER == 1)
-	{	
-		GO_AHEAD = -10;
-		for(i = 1; i <= 3; i++)
-			send(city_array[i],&GO_AHEAD,sizeof(int),0);
-//		printf("SENT GO AHEADS TO ALL CITIES\n");
+		barrier();
 	}
 	printf("ALL CITIES wrote to graphics file\n");
 }//makeGraphicFile
